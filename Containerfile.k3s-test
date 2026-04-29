@@ -1,0 +1,101 @@
+# ============================================================================
+#  SDR Radio Resource Task Manager
+#  k3s Integration Test Container  —  CentOS Stream 10
+#
+#  Deploys the controller via k3s (single-node Kubernetes), applies the
+#  real k8s manifests (adapted for test), and runs AMQP smoke tests.
+#
+#  Requires --privileged because k3s needs it.
+#  Requires the controller image as a mounted tar (avoids nested container
+#  build complexity — the host saves it, the test container imports it).
+#
+#  Build:
+#    podman build -f Containerfile.centos10 -t sdr-controller:test .
+#    podman save sdr-controller:test -o /tmp/sdr-controller.tar
+#    podman build -f Containerfile.k3s-test -t sdr-controller:k3s-test .
+#
+#  Run:
+#    podman run --rm --privileged \
+#      -v /tmp/sdr-controller.tar:/tmp/sdr-controller.tar:ro \
+#      sdr-controller:k3s-test
+# ============================================================================
+
+FROM quay.io/centos/centos:stream10
+
+LABEL description="SDR Radio Resource Task Manager — k3s integration test"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 1 — System packages
+# ─────────────────────────────────────────────────────────────────────────────
+RUN dnf install -y epel-release && \
+    dnf config-manager --enable crb && \
+    dnf update -y && \
+    dnf install -y \
+        gcc gcc-c++ make cmake ninja-build pkg-config \
+        git wget curl ca-certificates \
+        iproute procps-ng nmap-ncat \
+        fftw-devel libuuid-devel \
+        qpid-proton-cpp-devel \
+        tinyxml2-devel fmt-devel \
+        iptables conntrack-tools \
+    && dnf clean all
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 2 — spdlog, SoapySDR, SoapyRemote (for sdr_client binary)
+# ─────────────────────────────────────────────────────────────────────────────
+RUN git clone --depth 1 --branch v1.13.0 \
+        https://github.com/gabime/spdlog.git /tmp/spdlog && \
+    cmake -S /tmp/spdlog -B /tmp/spdlog/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DSPDLOG_FMT_EXTERNAL=ON -DSPDLOG_BUILD_SHARED=OFF && \
+    cmake --build /tmp/spdlog/build --parallel "$(nproc)" --target spdlog && \
+    cmake --install /tmp/spdlog/build && rm -rf /tmp/spdlog
+
+RUN git clone --depth 1 --branch soapy-sdr-0.8.1 \
+        https://github.com/pothosware/SoapySDR.git /tmp/SoapySDR && \
+    cmake -S /tmp/SoapySDR -B /tmp/SoapySDR/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DENABLE_PYTHON=OFF -DENABLE_PYTHON3=OFF && \
+    cmake --build /tmp/SoapySDR/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapySDR/build && rm -rf /tmp/SoapySDR
+
+RUN git clone --depth 1 \
+        https://github.com/pothosware/SoapyRemote.git /tmp/SoapyRemote && \
+    cmake -S /tmp/SoapyRemote -B /tmp/SoapyRemote/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH=/usr/local && \
+    cmake --build /tmp/SoapyRemote/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapyRemote/build && rm -rf /tmp/SoapyRemote
+
+RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/local.conf && ldconfig
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 3 — Build sdr_client (used by test script to send AMQP requests)
+# ─────────────────────────────────────────────────────────────────────────────
+COPY . /sdr
+RUN cp /sdr/CMakeLists.centos.txt /sdr/CMakeLists.txt && \
+    cp /sdr/client/CMakeLists.centos.txt /sdr/client/CMakeLists.txt
+RUN cmake -S /sdr -B /sdr/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -DSoapySDR_DIR=/usr/local/lib64/cmake/SoapySDR && \
+    cmake --build /sdr/build --parallel "$(nproc)" && \
+    install -m 755 /sdr/build/client/sdr_client /usr/local/bin/sdr_client
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 4 — Install k3s (single-binary Kubernetes distribution)
+# ─────────────────────────────────────────────────────────────────────────────
+ARG K3S_VERSION=v1.31.4+k3s1
+RUN curl -sfL \
+        "https://github.com/k3s-io/k3s/releases/download/${K3S_VERSION}/k3s" \
+        -o /usr/local/bin/k3s && \
+    chmod +x /usr/local/bin/k3s && \
+    ln -s /usr/local/bin/k3s /usr/local/bin/kubectl
+
+ENV LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib"
+
+COPY test-env/scripts/test_k3s.sh /usr/local/bin/test_k3s.sh
+COPY test-env/config/k3s-test-deployment.yaml /sdr/test-env/config/k3s-test-deployment.yaml
+RUN chmod +x /usr/local/bin/test_k3s.sh
+
+CMD ["/usr/local/bin/test_k3s.sh"]

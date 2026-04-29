@@ -1,0 +1,442 @@
+# ════════════════════════════════════════════════════════════════════════
+#  SDR Radio Resource Task Manager — Kubernetes Manifests
+#  Namespace, ConfigMap, ActiveMQ Broker, SDR Controller Deployment,
+#  SoapySDR Remote Services, NetworkPolicy
+# ════════════════════════════════════════════════════════════════════════
+
+---
+# ── Namespace ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdr-system
+  labels:
+    app.kubernetes.io/name: sdr-system
+
+---
+# ── ConfigMap: devices.xml ─────────────────────────────────────────────────
+# Mount this into the sdr-controller pod at /etc/sdr-controller/devices.xml
+# To update: kubectl create configmap sdr-config -n sdr-system \
+#              --from-file=devices.xml=config/devices.xml --dry-run=client -o yaml | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sdr-config
+  namespace: sdr-system
+  labels:
+    app: sdr-controller
+data:
+  devices.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <sdr_controller version="2.0">
+      <broker>
+        <url>amqp://activemq-service.sdr-system.svc.cluster.local:5672</url>
+        <username>sdr_ctrl</username>
+        <password>CHANGE_ME</password>  <!-- !! Set this in your local devices.xml; never commit a real password -->
+        <request_queue>sdr.task.request</request_queue>
+        <response_queue>sdr.task.response</response_queue>
+        <status_topic>sdr.status</status_topic>
+        <health_topic>sdr.health</health_topic>
+        <reconnect_interval_sec>5</reconnect_interval_sec>
+        <max_reconnect_interval_sec>60</max_reconnect_interval_sec>
+        <send_queue_depth>512</send_queue_depth>
+      </broker>
+      <policy>
+        <max_concurrent_tasks>64</max_concurrent_tasks>
+        <guard_band_hz>200000</guard_band_hz>
+        <usable_bw_fraction>0.80</usable_bw_fraction>
+        <default_task_timeout_ms>3600000</default_task_timeout_ms>
+        <scheduler_tick_ms>200</scheduler_tick_ms>
+        <watchdog_tick_ms>1000</watchdog_tick_ms>
+        <udp_port_pool_start>30000</udp_port_pool_start>
+        <udp_port_pool_end>31999</udp_port_pool_end>
+        <iq_packet_samples>1024</iq_packet_samples>
+        <retune_conflict_policy>REJECT_NEW</retune_conflict_policy>
+        <heartbeat_interval_ms>30000</heartbeat_interval_ms>
+      </policy>
+      <!--
+        DEVICE POOL — add or remove <device> blocks here; no code changes needed.
+        All <capabilities> values come from your hardware datasheet.
+        freq_min/max, bandwidth_max, sample_rate_max are the ONLY constraints
+        the scheduler uses — there are no global hardcoded limits in the code.
+        shared_lo: true = channels share one LO (AD9361, LimeSDR MIMO)
+                   false = channels tune independently (RTL-SDR, HackRF, USRP B210)
+        coherency_group: boards sharing a reference clock go in the same group;
+                         DF tasks can then request rx_count across all group boards.
+      -->
+      <devices>
+        <device id="pluto-0">
+          <driver>remote</driver>
+          <uri>soapy://pluto-sdr-0.sdr-hardware.svc.cluster.local:55132</uri>
+          <label>SDR Board Unit 0</label>
+          <streaming_source_ip>10.0.0.10</streaming_source_ip>
+          <shared_lo>true</shared_lo>
+          <coherency_group>refclk-group-0</coherency_group>
+          <capabilities>
+            <rx_channels>2</rx_channels>
+            <tx_channels>2</tx_channels>
+            <freq_min_hz>70000000</freq_min_hz>
+            <freq_max_hz>6000000000</freq_max_hz>
+            <bandwidth_max_hz>56000000</bandwidth_max_hz>
+            <sample_rate_max_sps>61440000</sample_rate_max_sps>
+            <rx_gain_min_db>-3</rx_gain_min_db>
+            <rx_gain_max_db>71</rx_gain_max_db>
+            <tx_atten_min_db>0</tx_atten_min_db>
+            <tx_atten_max_db>89</tx_atten_max_db>
+          </capabilities>
+        </device>
+        <device id="pluto-1">
+          <driver>remote</driver>
+          <uri>soapy://pluto-sdr-1.sdr-hardware.svc.cluster.local:55132</uri>
+          <label>SDR Board Unit 1</label>
+          <streaming_source_ip>10.0.0.11</streaming_source_ip>
+          <shared_lo>true</shared_lo>
+          <coherency_group>refclk-group-0</coherency_group>
+          <capabilities>
+            <rx_channels>2</rx_channels>
+            <tx_channels>2</tx_channels>
+            <freq_min_hz>70000000</freq_min_hz>
+            <freq_max_hz>6000000000</freq_max_hz>
+            <bandwidth_max_hz>56000000</bandwidth_max_hz>
+            <sample_rate_max_sps>61440000</sample_rate_max_sps>
+            <rx_gain_min_db>-3</rx_gain_min_db>
+            <rx_gain_max_db>71</rx_gain_max_db>
+            <tx_atten_min_db>0</tx_atten_min_db>
+            <tx_atten_max_db>89</tx_atten_max_db>
+          </capabilities>
+        </device>
+      </devices>
+    </sdr_controller>
+
+---
+# ── Secret: AMQP credentials ──────────────────────────────────────────────
+# In production: replace with sealed-secrets or Vault injection.
+# Create with: kubectl create secret generic sdr-amqp-credentials \
+#   -n sdr-system --from-literal=username=sdr_ctrl \
+#   --from-literal=password=CHANGE_ME
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sdr-amqp-credentials
+  namespace: sdr-system
+type: Opaque
+stringData:
+  username: sdr_ctrl
+  password: CHANGE_ME  # !! Set a real password before applying; never commit a real value
+
+---
+# ── ActiveMQ Artemis StatefulSet ──────────────────────────────────────────
+# Single-broker for the cluster. Use an HA pair in production.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: activemq
+  namespace: sdr-system
+  labels:
+    app: activemq
+spec:
+  serviceName: activemq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: activemq
+  template:
+    metadata:
+      labels:
+        app: activemq
+    spec:
+      containers:
+        - name: activemq
+          image: apache/activemq-artemis:2.36.0
+          ports:
+            - containerPort: 5672
+              name: amqp
+            - containerPort: 8161
+              name: console
+          env:
+            - name: ARTEMIS_USER
+              value: admin
+            - name: ARTEMIS_PASSWORD
+              value: admin_secret_change_me
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/artemis-instance
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+# ActiveMQ Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: activemq-service
+  namespace: sdr-system
+  labels:
+    app: activemq
+spec:
+  selector:
+    app: activemq
+  ports:
+    - port: 5672
+      targetPort: 5672
+      name: amqp
+    - port: 8161
+      targetPort: 8161
+      name: console
+  type: ClusterIP
+
+---
+# ── SoapySDR Remote Services ──────────────────────────────────────────────
+# One headless Service per physical SDR node.
+# In production these nodes run SoapySDRServer on the bare-metal host.
+# The service DNS resolves to the node's IP via ExternalName or NodePort.
+
+# Board 0 — resolves to pluto-sdr-0 physical node
+apiVersion: v1
+kind: Service
+metadata:
+  name: pluto-sdr-0
+  namespace: sdr-hardware
+  labels:
+    sdr-board: "0"
+spec:
+  type: ExternalName
+  externalName: 192.168.10.100  # ← Replace with actual SDR node IP
+  ports:
+    - port: 55132
+      name: soapy
+
+---
+# Board 1
+apiVersion: v1
+kind: Service
+metadata:
+  name: pluto-sdr-1
+  namespace: sdr-hardware
+  labels:
+    sdr-board: "1"
+spec:
+  type: ExternalName
+  externalName: 192.168.10.101  # ← Replace with actual SDR node IP
+  ports:
+    - port: 55132
+      name: soapy
+
+---
+# SDR hardware namespace (keep separate from sdr-system)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdr-hardware
+
+---
+# ── SDR Controller Deployment ─────────────────────────────────────────────
+# CRITICAL: strategy must be Recreate.
+# Two controller instances would both try to own the radios.
+# SoapySDR Remote connections are exclusive.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sdr-controller
+  namespace: sdr-system
+  labels:
+    app: sdr-controller
+    version: "2.1.0"
+spec:
+  replicas: 1
+  # ─── RECREATE ─── not RollingUpdate ───────────────────────────────────
+  # This guarantees the old pod fully releases radio resources before
+  # the new pod starts. RollingUpdate would cause two pods to fight over
+  # SoapySDR connections, corrupting hardware state.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sdr-controller
+  template:
+    metadata:
+      labels:
+        app: sdr-controller
+        version: "2.1.0"
+      annotations:
+        # Prometheus scrape (if you add a metrics endpoint)
+        prometheus.io/scrape: "false"
+    spec:
+      # Ensure pod only runs on nodes that have network access to SDR hardware
+      nodeSelector:
+        sdr-network-access: "true"
+
+      # Grace period: allow in-flight tasks to complete before SIGTERM
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: sdr-controller
+          image: ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0  # ← Replace YOUR_USERNAME with your GitHub username
+          imagePullPolicy: Always
+
+          ports:
+            # IQ stream source ports (UDP, range 30000–31999)
+            # These are the source ports; DSP pods receive on their own ports.
+            # No inbound ports needed; controller initiates UDP streams outbound.
+            []
+
+          env:
+            - name: SDR_CONFIG_PATH
+              value: /etc/sdr-controller/devices.xml
+            - name: SDR_LOG_LEVEL
+              value: info
+            # Pod IP for IQ stream source (used in ACCEPT responses)
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+          volumeMounts:
+            - name: sdr-config-volume
+              mountPath: /etc/sdr-controller
+              readOnly: true
+
+          resources:
+            requests:
+              cpu: "1"
+              memory: "512Mi"
+            limits:
+              cpu: "4"
+              memory: "2Gi"
+
+          livenessProbe:
+            # AMQP health: controller publishes to sdr.health every 30s.
+            # In production add an HTTP health endpoint. For now use process alive.
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              # NET_RAW needed for raw UDP socket (IQ streaming)
+              add: ["NET_RAW"]
+
+      volumes:
+        - name: sdr-config-volume
+          configMap:
+            name: sdr-config
+            items:
+              - key: devices.xml
+                path: devices.xml
+
+      # Pod anti-affinity: don't co-locate with itself (only 1 replica anyway)
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: sdr-controller
+              topologyKey: kubernetes.io/hostname
+
+---
+# ── NetworkPolicy ─────────────────────────────────────────────────────────
+# Allow controller to:
+#   - Receive AMQP from DSP pods
+#   - Connect to broker
+#   - Connect to SoapySDR Remote servers (port 55132)
+#   - Send UDP IQ to DSP pods (any port in cluster)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sdr-controller-netpol
+  namespace: sdr-system
+spec:
+  podSelector:
+    matchLabels:
+      app: sdr-controller
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow health scrape from monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # AMQP to broker
+    - to:
+        - podSelector:
+            matchLabels:
+              app: activemq
+      ports:
+        - port: 5672
+          protocol: TCP
+    # SoapySDR Remote (SDR hardware nodes)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sdr-hardware
+      ports:
+        - port: 55132
+          protocol: TCP
+    # UDP IQ streams to DSP pods (cluster-wide)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 1
+          endPort: 65535
+          protocol: UDP
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ── HorizontalPodAutoscaler — DISABLED ───────────────────────────────────
+# DO NOT enable HPA for sdr-controller. Hardware ownership is exclusive.
+# If CPU spikes, that is normal (FFT, IQ packing). Do not scale.
+# This comment intentionally left here as a warning.
+
+---
+# ── PodDisruptionBudget ───────────────────────────────────────────────────
+# Allow zero disruptions — the controller must not be evicted during
+# active RF tasks. Cluster upgrades must drain this pod deliberately.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sdr-controller-pdb
+  namespace: sdr-system
+spec:
+  minAvailable: 0   # Allow disruption during planned maintenance
+  selector:
+    matchLabels:
+      app: sdr-controller

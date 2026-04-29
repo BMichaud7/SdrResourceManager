@@ -1,0 +1,74 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  SDR Controller — Development / Test Container
+#  Ubuntu 24.04 with ALL build + runtime dependencies pre-installed.
+#  Source is bind-mounted at /workspace at runtime; nothing is baked in.
+#
+#  Build:
+#    podman build -f test-env/Dockerfile.dev -t sdr-dev .
+#
+#  Run tests (GTest suite, exits 0 on pass):
+#    podman run --rm -v $(pwd):/workspace:z sdr-dev \
+#        /workspace/test-env/scripts/run_tests.sh
+#
+#  Interactive dev shell:
+#    podman run --rm -it -v $(pwd):/workspace:z sdr-dev bash
+# ════════════════════════════════════════════════════════════════════════════
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# ── Build tools ──────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    git \
+    ca-certificates \
+    wget \
+    curl \
+    # Runtime / debug tools
+    gdb \
+    valgrind \
+    strace \
+    lsof \
+    netcat-openbsd \
+    iproute2 \
+    # ── SoapySDR ────────────────────────────────────────────────────────
+    libsoapysdr-dev \
+    soapysdr-tools \
+    # SoapyRemote client module (so SoapySDR::Device::make("remote",...) works)
+    soapysdr-module-remote \
+    # ── AMQP 1.0: qpid-proton C++ ───────────────────────────────────────
+    libqpid-proton-cpp12-dev \
+    libqpid-proton11-dev \
+    # ── XML ─────────────────────────────────────────────────────────────
+    libtinyxml2-dev \
+    # ── JSON (header-only, system package) ──────────────────────────────
+    nlohmann-json3-dev \
+    # ── Logging ─────────────────────────────────────────────────────────
+    libspdlog-dev \
+    libfmt-dev \
+    # ── FFTW3 single precision ───────────────────────────────────────────
+    libfftw3-dev \
+    # ── UUID ────────────────────────────────────────────────────────────
+    uuid-dev \
+    # ── Threads ─────────────────────────────────────────────────────────
+    libpthread-stubs0-dev \
+    # ── Python (for test scripts) ────────────────────────────────────────
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python test helpers ──────────────────────────────────────────────────
+# python-qpid-proton for quick AMQP smoke tests without building the client
+RUN pip3 install --break-system-packages python-qpid-proton || true
+
+# ── Pre-create build output dirs ────────────────────────────────────────
+RUN mkdir -p /workspace /build-output
+WORKDIR /workspace
+
+# Default to interactive shell; override with CMD in compose/scripts
+CMD ["/bin/bash"]

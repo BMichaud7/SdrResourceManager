@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SDR Radio Resource Controller — Device and Policy Configuration
+  Version: 2.0
+  ─────────────────────────────────────────────────────────────────────────
+  To add a new SDR board: copy a <device> block, change id/uri/label/ip.
+  No code changes required. All frequencies in Hz, times in ms/sec.
+-->
+<sdr_controller version="2.0">
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!--  AMQP Broker Connection                                    -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <broker>
+    <url>amqp://activemq-service.sdr-system.svc.cluster.local:5672</url>
+    <username>sdr_ctrl</username>
+    <password>CHANGE_ME</password>  <!-- Set your actual broker password here; never commit a real password -->
+    <request_queue>sdr.task.request</request_queue>
+    <response_queue>sdr.task.response</response_queue>
+    <status_topic>sdr.status</status_topic>
+    <health_topic>sdr.health</health_topic>
+    <!-- Reconnect backoff: starts at interval_sec, doubles to max -->
+    <reconnect_interval_sec>5</reconnect_interval_sec>
+    <max_reconnect_interval_sec>60</max_reconnect_interval_sec>
+    <send_queue_depth>512</send_queue_depth>
+  </broker>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!--  Resource Scheduling Policy                                -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <policy>
+    <!-- Hard ceiling on tasks in {SCHEDULED,PENDING,RUNNING} total -->
+    <max_concurrent_tasks>64</max_concurrent_tasks>
+
+    <!-- Minimum frequency gap between adjacent spectrum slices -->
+    <guard_band_hz>200000</guard_band_hz>
+
+    <!-- Fraction of sample_rate that is usable after roll-off (0.80 suits most SDRs) -->
+    <usable_bw_fraction>0.80</usable_bw_fraction>
+
+    <!-- Default task duration for IMMEDIATE with no end_time (ms) -->
+    <default_task_timeout_ms>3600000</default_task_timeout_ms>
+
+    <!-- How often scheduler_thread wakes to start SCHEDULED tasks (ms) -->
+    <scheduler_tick_ms>200</scheduler_tick_ms>
+
+    <!-- How often watchdog_thread wakes to expire timed-out tasks (ms) -->
+    <watchdog_tick_ms>1000</watchdog_tick_ms>
+
+    <!-- UDP IQ stream port pool (one port per channel per task) -->
+    <udp_port_pool_start>30000</udp_port_pool_start>
+    <udp_port_pool_end>31999</udp_port_pool_end>
+
+    <!-- IQ samples per UDP packet (CF32 = 8 bytes/sample)
+         Default 1024 → 8224-byte packets (requires jumbo frames).
+         Set ≤183 for standard 1500-byte MTU. -->
+    <iq_packet_samples>1024</iq_packet_samples>
+
+    <!-- What to do when a new task needs a different CF than current active:
+         REJECT_NEW    = reject the incoming task (safe, conservative)
+         CANCEL_LOWER  = cancel lower-priority tasks to accommodate -->
+    <retune_conflict_policy>REJECT_NEW</retune_conflict_policy>
+
+    <!-- Health heartbeat publish interval (ms) -->
+    <heartbeat_interval_ms>30000</heartbeat_interval_ms>
+  </policy>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!--  SDR Device Pool                                           -->
+  <!--  Add boards here. No code changes needed.                  -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <devices>
+
+    <!-- Board 0 ─────────────────────────────────────────────── -->
+    <device id="pluto-0">
+      <!-- SoapySDR driver. "remote" = SoapySDRServer over network.
+           Use "plutosdr" only for direct USB (dev/test). -->
+      <driver>remote</driver>
+
+      <!-- SoapyRemote URI. Resolves via Kubernetes Service. -->
+      <uri>soapy://pluto-sdr-0.sdr-hardware.svc.cluster.local:55132</uri>
+
+      <label>SDR Board Unit 0</label>
+
+      <!-- IP this pod uses as UDP SOURCE when streaming IQ to DSP pods.
+           Must be reachable from DSP pod network. Use pod or node IP. -->
+      <streaming_source_ip>10.0.0.10</streaming_source_ip>
+
+      <!-- Coherency group: all boards on the same 10 MHz reference clock.
+           Used for multi-device coherent task allocation. -->
+      <coherency_group>refclk-group-0</coherency_group>
+
+      <!-- shared_lo=true: all RX channels share one LO/RF window (e.g. AD9361, LimeSDR MIMO).
+           Set to false for devices with independently-tunable channels (e.g. RTL-SDR, HackRF). -->
+      <shared_lo>true</shared_lo>
+
+      <!-- All values from hardware datasheet — these are the only constraints
+           the scheduler enforces. No global hardcoded limits exist in code.
+           Examples: AD9361 freq 70 MHz–6 GHz; HackRF 1 MHz–6 GHz; RTL-SDR 24 MHz–1.766 GHz -->
+      <capabilities>
+        <rx_channels>2</rx_channels>
+        <tx_channels>2</tx_channels>
+        <freq_min_hz>70000000</freq_min_hz>
+        <freq_max_hz>6000000000</freq_max_hz>
+        <bandwidth_max_hz>56000000</bandwidth_max_hz>
+        <sample_rate_max_sps>61440000</sample_rate_max_sps>
+        <rx_gain_min_db>-3</rx_gain_min_db>
+        <rx_gain_max_db>71</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>89</tx_atten_max_db>
+      </capabilities>
+    </device>
+
+    <!-- Board 1 ─────────────────────────────────────────────── -->
+    <device id="pluto-1">
+      <driver>remote</driver>
+      <uri>soapy://pluto-sdr-1.sdr-hardware.svc.cluster.local:55132</uri>
+      <label>SDR Board Unit 1</label>
+      <streaming_source_ip>10.0.0.11</streaming_source_ip>
+      <coherency_group>refclk-group-0</coherency_group>
+      <shared_lo>true</shared_lo>
+      <capabilities>
+        <rx_channels>2</rx_channels>
+        <tx_channels>2</tx_channels>
+        <freq_min_hz>70000000</freq_min_hz>
+        <freq_max_hz>6000000000</freq_max_hz>
+        <bandwidth_max_hz>56000000</bandwidth_max_hz>
+        <sample_rate_max_sps>61440000</sample_rate_max_sps>
+        <rx_gain_min_db>-3</rx_gain_min_db>
+        <rx_gain_max_db>71</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>89</tx_atten_max_db>
+      </capabilities>
+    </device>
+
+    <!-- Board 2 — uncomment to add a third board ────────────── -->
+    <!--
+    <device id="pluto-2">
+      <driver>remote</driver>
+      <uri>soapy://pluto-sdr-2.sdr-hardware.svc.cluster.local:55132</uri>
+      <label>SDR Board Unit 2</label>
+      <streaming_source_ip>10.0.0.12</streaming_source_ip>
+      <coherency_group>refclk-group-0</coherency_group>
+      <capabilities>
+        <rx_channels>2</rx_channels>
+        <tx_channels>2</tx_channels>
+        <freq_min_hz>70000000</freq_min_hz>
+        <freq_max_hz>6000000000</freq_max_hz>
+        <bandwidth_max_hz>56000000</bandwidth_max_hz>
+        <sample_rate_max_sps>61440000</sample_rate_max_sps>
+        <rx_gain_min_db>-3</rx_gain_min_db>
+        <rx_gain_max_db>71</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>89</tx_atten_max_db>
+      </capabilities>
+    </device>
+    -->
+
+  </devices>
+
+</sdr_controller>

@@ -1,0 +1,125 @@
+# ============================================================================
+#  SDR Radio Resource Task Manager
+#  Systemd Integration Test Container  —  CentOS Stream 10
+#
+#  Validates that the systemd service files are correct and that the
+#  controller starts cleanly under the 'sdr' system user with a live
+#  ActiveMQ Artemis broker, then passes AMQP health/task smoke tests.
+#
+#  Build:
+#    podman build -f Containerfile.systemd-test -t sdr-controller:systemd-test .
+#
+#  Run (no --privileged needed):
+#    podman run --rm sdr-controller:systemd-test
+# ============================================================================
+
+FROM quay.io/centos/centos:stream10
+
+LABEL description="SDR Radio Resource Task Manager — systemd integration test"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 1 — System packages (same as Containerfile.centos10 + Java for broker)
+# ─────────────────────────────────────────────────────────────────────────────
+RUN dnf install -y epel-release && \
+    dnf config-manager --enable crb && \
+    dnf update -y && \
+    dnf install -y \
+        gcc gcc-c++ make cmake ninja-build pkg-config \
+        git wget curl ca-certificates \
+        iproute procps-ng nmap-ncat \
+        fftw-devel libuuid-devel \
+        qpid-proton-cpp-devel \
+        tinyxml2-devel fmt-devel \
+        shadow-utils \
+        java-21-openjdk-headless \
+        systemd \
+    && dnf clean all
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 2 — spdlog, SoapySDR, SoapyRemote (identical to Containerfile.centos10)
+# ─────────────────────────────────────────────────────────────────────────────
+RUN git clone --depth 1 --branch v1.13.0 \
+        https://github.com/gabime/spdlog.git /tmp/spdlog && \
+    cmake -S /tmp/spdlog -B /tmp/spdlog/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DSPDLOG_FMT_EXTERNAL=ON -DSPDLOG_BUILD_SHARED=OFF && \
+    cmake --build /tmp/spdlog/build --parallel "$(nproc)" --target spdlog && \
+    cmake --install /tmp/spdlog/build && rm -rf /tmp/spdlog
+
+RUN git clone --depth 1 --branch soapy-sdr-0.8.1 \
+        https://github.com/pothosware/SoapySDR.git /tmp/SoapySDR && \
+    cmake -S /tmp/SoapySDR -B /tmp/SoapySDR/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DENABLE_PYTHON=OFF -DENABLE_PYTHON3=OFF && \
+    cmake --build /tmp/SoapySDR/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapySDR/build && rm -rf /tmp/SoapySDR
+
+RUN git clone --depth 1 \
+        https://github.com/pothosware/SoapyRemote.git /tmp/SoapyRemote && \
+    cmake -S /tmp/SoapyRemote -B /tmp/SoapyRemote/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH=/usr/local && \
+    cmake --build /tmp/SoapyRemote/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapyRemote/build && rm -rf /tmp/SoapyRemote
+
+RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/local.conf && ldconfig
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 3 — ActiveMQ Artemis (broker for integration test)
+# ─────────────────────────────────────────────────────────────────────────────
+ARG ARTEMIS_VERSION=2.36.0
+RUN wget -q \
+        "https://downloads.apache.org/activemq/activemq-artemis/${ARTEMIS_VERSION}/apache-artemis-${ARTEMIS_VERSION}-bin.tar.gz" \
+        -O /tmp/artemis.tar.gz && \
+    tar -xzf /tmp/artemis.tar.gz -C /opt && \
+    mv /opt/apache-artemis-${ARTEMIS_VERSION} /opt/artemis && \
+    rm /tmp/artemis.tar.gz && \
+    /opt/artemis/bin/artemis create /opt/artemis-broker \
+        --user sdr_ctrl \
+        --password sdr_test_pw \
+        --allow-anonymous \
+        --no-autotune \
+        --no-web \
+        --silent
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 4 — Build sdr-controller + sdr_client
+# ─────────────────────────────────────────────────────────────────────────────
+COPY . /sdr
+RUN cp /sdr/CMakeLists.centos.txt /sdr/CMakeLists.txt && \
+    cp /sdr/client/CMakeLists.centos.txt /sdr/client/CMakeLists.txt
+RUN cmake -S /sdr -B /sdr/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -DSoapySDR_DIR=/usr/local/lib64/cmake/SoapySDR && \
+    cmake --build /sdr/build --parallel "$(nproc)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 5 — Install exactly as setup.sh systemd path does
+# ─────────────────────────────────────────────────────────────────────────────
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin sdr && \
+    install -m 755 /sdr/build/sdr_controller  /usr/local/bin/sdr_controller && \
+    install -m 755 /sdr/build/client/sdr_client /usr/local/bin/sdr_client && \
+    mkdir -p /etc/sdr-controller && \
+    # Use the test devices config; point broker to localhost
+    install -m 640 -o root -g sdr \
+        /sdr/test-env/config/devices-test.xml \
+        /etc/sdr-controller/devices.xml && \
+    sed -i 's|amqp://activemq:5672|amqp://localhost:5672|g' \
+        /etc/sdr-controller/devices.xml && \
+    # Install service files (as setup.sh --systemd would)
+    install -m 644 /sdr/systemd/sdr-controller.service  /etc/systemd/system/ && \
+    install -m 644 /sdr/systemd/activemq-artemis.service /etc/systemd/system/ && \
+    # Broker credentials file
+    printf 'ARTEMIS_USER=sdr_ctrl\nARTEMIS_PASSWORD=sdr_test_pw\n' \
+        > /etc/sdr-controller/broker.env && \
+    chmod 640 /etc/sdr-controller/broker.env && \
+    chown root:sdr /etc/sdr-controller/broker.env
+
+ENV LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib"
+ENV JAVA_HOME="/usr/lib/jvm/jre-21"
+
+COPY test-env/scripts/test_systemd.sh /usr/local/bin/test_systemd.sh
+RUN chmod +x /usr/local/bin/test_systemd.sh
+
+CMD ["/usr/local/bin/test_systemd.sh"]

@@ -1,0 +1,41 @@
+[Unit]
+Description=SDR Radio Resource Task Manager
+Documentation=file:README.md
+After=network-online.target
+Wants=network-online.target
+# If the broker runs on this same machine, uncomment these two lines so the
+# controller waits for the broker before starting:
+#After=activemq-artemis.service
+#Requires=activemq-artemis.service
+
+[Service]
+Type=simple
+User=sdr
+Group=sdr
+
+# Override log level here or via: systemctl edit sdr-controller
+Environment=SDR_LOG_LEVEL=info
+
+ExecStart=/usr/local/bin/sdr_controller /etc/sdr-controller/devices.xml
+
+# Restart on crash, but not on clean exit (e.g. manual systemctl stop)
+Restart=on-failure
+RestartSec=10s
+
+# Give in-flight IQ tasks 35 s to drain before SIGKILL
+TimeoutStopSec=35s
+
+# All log output goes to the system journal.
+# View with: journalctl -u sdr-controller -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sdr-controller
+
+# Security hardening — controller only reads config and opens network sockets
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

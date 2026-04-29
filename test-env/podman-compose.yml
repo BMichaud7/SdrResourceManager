@@ -1,0 +1,57 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  SDR Controller — Test Environment (podman-compose)
+#
+#  Runs the GTest unit suite inside an isolated container.
+#  No broker or real hardware needed — tests use FakeSoapyDevice.
+#
+#  Usage:
+#    podman-compose up --build          # build image and run tests
+#    podman-compose run --rm sdr-test   # run tests interactively
+#
+#  Interactive dev shell:
+#    podman-compose --profile dev run sdr-dev
+# ════════════════════════════════════════════════════════════════════════════
+
+version: "3.8"
+
+services:
+
+  # ── GTest unit test runner (exits 0 on pass, non-zero on failure) ───────
+  sdr-test:
+    build:
+      context: ..
+      dockerfile: test-env/Dockerfile.dev
+    container_name: sdr-test
+    volumes:
+      - ..:/workspace:z
+      - build-cache:/build-output
+    working_dir: /workspace
+    command: /workspace/test-env/scripts/run_tests.sh
+    networks:
+      - sdr-test
+
+  # ── Interactive dev shell (not started by default) ─────────────────────
+  sdr-dev:
+    build:
+      context: ..
+      dockerfile: test-env/Dockerfile.dev
+    container_name: sdr-dev
+    profiles:
+      - dev
+    volumes:
+      - ..:/workspace:z
+      - build-cache:/build-output
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+    networks:
+      - sdr-test
+
+volumes:
+  build-cache:
+    driver: local
+
+networks:
+  sdr-test:
+    driver: bridge

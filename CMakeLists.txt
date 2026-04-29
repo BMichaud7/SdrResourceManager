@@ -1,0 +1,123 @@
+cmake_minimum_required(VERSION 3.20)
+project(sdr_controller VERSION 2.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ── Compiler flags ───────────────────────────────────────────────────────────
+add_compile_options(
+    -Wall -Wextra -Wpedantic
+    -Wno-unused-parameter
+    $<$<CONFIG:Release>:-O3>
+    $<$<CONFIG:Debug>:-g>
+    $<$<CONFIG:Debug>:-fsanitize=address>
+    $<$<CONFIG:Debug>:-fsanitize=undefined>
+)
+add_link_options(
+    $<$<CONFIG:Debug>:-fsanitize=address>
+    $<$<CONFIG:Debug>:-fsanitize=undefined>
+)
+
+# ── PkgConfig ────────────────────────────────────────────────────────────────
+find_package(PkgConfig REQUIRED)
+
+# ── SoapySDR ─────────────────────────────────────────────────────────────────
+find_package(SoapySDR REQUIRED)
+
+# ── qpid-proton C++ (AMQP 1.0) ───────────────────────────────────────────────
+# Try pkg-config first; fall back to find_library when transitive .pc files
+# are absent (common on some Ubuntu installations).
+pkg_check_modules(PROTON libqpid-proton-cpp)
+if(NOT PROTON_FOUND)
+    find_library(PROTON_CPP_LIB NAMES qpid-proton-cpp REQUIRED)
+    find_path(PROTON_INCLUDE_DIR NAMES proton/connection.hpp REQUIRED)
+    set(PROTON_LIBRARIES    ${PROTON_CPP_LIB})
+    set(PROTON_INCLUDE_DIRS ${PROTON_INCLUDE_DIR})
+    message(STATUS "qpid-proton-cpp found via find_library: ${PROTON_CPP_LIB}")
+endif()
+
+# ── TinyXML2 ─────────────────────────────────────────────────────────────────
+pkg_check_modules(TINYXML2 REQUIRED tinyxml2)
+
+# ── spdlog ───────────────────────────────────────────────────────────────────
+find_package(spdlog QUIET)
+if(NOT spdlog_FOUND)
+    pkg_check_modules(SPDLOG REQUIRED spdlog)
+    add_library(spdlog::spdlog INTERFACE IMPORTED)
+    target_include_directories(spdlog::spdlog INTERFACE ${SPDLOG_INCLUDE_DIRS})
+    target_link_libraries(spdlog::spdlog INTERFACE ${SPDLOG_LIBRARIES})
+endif()
+
+# ── fmt ───────────────────────────────────────────────────────────────────────
+find_package(fmt QUIET)
+if(NOT fmt_FOUND)
+    pkg_check_modules(FMT REQUIRED fmt)
+    add_library(fmt::fmt INTERFACE IMPORTED)
+    target_include_directories(fmt::fmt INTERFACE ${FMT_INCLUDE_DIRS})
+    target_link_libraries(fmt::fmt INTERFACE ${FMT_LIBRARIES})
+endif()
+
+# ── nlohmann/json ─────────────────────────────────────────────────────────────
+find_package(nlohmann_json 3.11 QUIET)
+if(NOT nlohmann_json_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
+
+# ── FFTW3 single-precision ────────────────────────────────────────────────────
+find_library(FFTW3F_LIB NAMES fftw3f REQUIRED)
+find_path(FFTW3_INCLUDE NAMES fftw3.h REQUIRED)
+
+# ── libuuid ───────────────────────────────────────────────────────────────────
+find_library(UUID_LIB NAMES uuid REQUIRED)
+find_path(UUID_INCLUDE NAMES uuid/uuid.h REQUIRED)
+
+# ── Threads ───────────────────────────────────────────────────────────────────
+find_package(Threads REQUIRED)
+
+# ── Controller executable ─────────────────────────────────────────────────────
+file(GLOB CONTROLLER_SOURCES src/*.cpp)
+add_executable(sdr_controller ${CONTROLLER_SOURCES})
+
+target_include_directories(sdr_controller PRIVATE
+    include
+    ${SoapySDR_INCLUDE_DIRS}
+    ${PROTON_INCLUDE_DIRS}
+    ${TINYXML2_INCLUDE_DIRS}
+    ${FFTW3_INCLUDE}
+    ${UUID_INCLUDE}
+)
+
+target_link_libraries(sdr_controller PRIVATE
+    SoapySDR
+    ${PROTON_LIBRARIES}
+    ${TINYXML2_LIBRARIES}
+    spdlog::spdlog
+    fmt::fmt
+    ${FFTW3F_LIB}
+    ${UUID_LIB}
+    Threads::Threads
+    nlohmann_json::nlohmann_json
+)
+
+target_compile_definitions(sdr_controller PRIVATE
+    SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG
+    SPDLOG_FMT_EXTERNAL
+)
+
+# ── Client ────────────────────────────────────────────────────────────────────
+add_subdirectory(client)
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+enable_testing()
+add_subdirectory(tests)
+
+# ── Install ───────────────────────────────────────────────────────────────────
+install(TARGETS sdr_controller DESTINATION bin)
+install(FILES config/devices.xml DESTINATION etc/sdr-controller)

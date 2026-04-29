@@ -1,0 +1,216 @@
+# ============================================================================
+#  SDR Controller — k3s Integration Test Deployment
+#
+#  Differences from k8s/deployment.yaml:
+#   - Uses the sdr-controller:test image (imported from host tar)
+#   - imagePullPolicy: Never (image is pre-loaded, no registry needed)
+#   - Null-driver mock devices (no real hardware required)
+#   - Test broker credentials (sdr_ctrl / sdr_test_pw)
+#   - nodeSelector removed (single-node cluster)
+#   - podAntiAffinity removed (single-node cluster)
+#   - ActiveMQ uses emptyDir instead of PVC
+#   - readOnlyRootFilesystem disabled (test environment)
+# ============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdr-system
+
+---
+# ── Test ConfigMap: devices.xml with null-driver mock devices ─────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sdr-config
+  namespace: sdr-system
+data:
+  devices.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <sdr_controller version="2.0">
+      <broker>
+        <url>amqp://activemq-service.sdr-system.svc.cluster.local:5672</url>
+        <username>sdr_ctrl</username>
+        <password>sdr_test_pw</password>
+        <request_queue>sdr.task.request</request_queue>
+        <response_queue>sdr.task.response</response_queue>
+        <status_topic>sdr.status</status_topic>
+        <health_topic>sdr.health</health_topic>
+        <reconnect_interval_sec>3</reconnect_interval_sec>
+        <max_reconnect_interval_sec>15</max_reconnect_interval_sec>
+        <send_queue_depth>256</send_queue_depth>
+      </broker>
+      <policy>
+        <max_concurrent_tasks>32</max_concurrent_tasks>
+        <guard_band_hz>200000</guard_band_hz>
+        <usable_bw_fraction>0.80</usable_bw_fraction>
+        <default_task_timeout_ms>60000</default_task_timeout_ms>
+        <scheduler_tick_ms>200</scheduler_tick_ms>
+        <watchdog_tick_ms>500</watchdog_tick_ms>
+        <udp_port_pool_start>30000</udp_port_pool_start>
+        <udp_port_pool_end>30099</udp_port_pool_end>
+        <iq_packet_samples>128</iq_packet_samples>
+        <retune_conflict_policy>REJECT_NEW</retune_conflict_policy>
+        <heartbeat_interval_ms>10000</heartbeat_interval_ms>
+      </policy>
+      <devices>
+        <device id="mock-0">
+          <driver>null</driver>
+          <uri>null</uri>
+          <label>Mock Device 0 (null driver)</label>
+          <streaming_source_ip>127.0.0.1</streaming_source_ip>
+          <shared_lo>true</shared_lo>
+          <coherency_group>test-group-0</coherency_group>
+          <capabilities>
+            <rx_channels>2</rx_channels>
+            <tx_channels>2</tx_channels>
+            <freq_min_hz>70000000</freq_min_hz>
+            <freq_max_hz>6000000000</freq_max_hz>
+            <bandwidth_max_hz>56000000</bandwidth_max_hz>
+            <sample_rate_max_sps>61440000</sample_rate_max_sps>
+            <rx_gain_min_db>-3</rx_gain_min_db>
+            <rx_gain_max_db>71</rx_gain_max_db>
+            <tx_atten_min_db>0</tx_atten_min_db>
+            <tx_atten_max_db>89</tx_atten_max_db>
+          </capabilities>
+        </device>
+        <device id="mock-1">
+          <driver>null</driver>
+          <uri>null</uri>
+          <label>Mock Device 1 (null driver)</label>
+          <streaming_source_ip>127.0.0.1</streaming_source_ip>
+          <shared_lo>true</shared_lo>
+          <coherency_group>test-group-0</coherency_group>
+          <capabilities>
+            <rx_channels>2</rx_channels>
+            <tx_channels>2</tx_channels>
+            <freq_min_hz>70000000</freq_min_hz>
+            <freq_max_hz>6000000000</freq_max_hz>
+            <bandwidth_max_hz>56000000</bandwidth_max_hz>
+            <sample_rate_max_sps>61440000</sample_rate_max_sps>
+            <rx_gain_min_db>-3</rx_gain_min_db>
+            <rx_gain_max_db>71</rx_gain_max_db>
+            <tx_atten_min_db>0</tx_atten_min_db>
+            <tx_atten_max_db>89</tx_atten_max_db>
+          </capabilities>
+        </device>
+      </devices>
+    </sdr_controller>
+
+---
+# ── ActiveMQ Artemis (emptyDir storage — test only) ───────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: activemq
+  namespace: sdr-system
+spec:
+  serviceName: activemq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: activemq
+  template:
+    metadata:
+      labels:
+        app: activemq
+    spec:
+      containers:
+        - name: activemq
+          image: apache/activemq-artemis:2.36.0
+          ports:
+            - containerPort: 5672
+              name: amqp
+          env:
+            - name: ARTEMIS_USER
+              value: sdr_ctrl
+            - name: ARTEMIS_PASSWORD
+              value: sdr_test_pw
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/artemis-instance
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: activemq-service
+  namespace: sdr-system
+spec:
+  selector:
+    app: activemq
+  ports:
+    - port: 5672
+      targetPort: 5672
+      name: amqp
+
+---
+# ── SDR Controller Deployment ─────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sdr-controller
+  namespace: sdr-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sdr-controller
+  template:
+    metadata:
+      labels:
+        app: sdr-controller
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: sdr-controller
+          # Loaded from /tmp/sdr-controller.tar by the test script.
+          # Tag after import: docker.io/library/sdr-controller:test
+          image: docker.io/library/sdr-controller:test
+          imagePullPolicy: Never
+          env:
+            - name: SDR_LOG_LEVEL
+              value: info
+            - name: LD_LIBRARY_PATH
+              value: /usr/local/lib64:/usr/local/lib
+          command: ["/sdr/build/sdr_controller"]
+          args:  ["/etc/sdr-controller/devices.xml"]
+          volumeMounts:
+            - name: sdr-config-volume
+              mountPath: /etc/sdr-controller
+              readOnly: true
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          # Simple process-alive probe — no HTTP endpoint in test
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          securityContext:
+            runAsNonRoot: false
+      volumes:
+        - name: sdr-config-volume
+          configMap:
+            name: sdr-config
+            items:
+              - key: devices.xml
+                path: devices.xml

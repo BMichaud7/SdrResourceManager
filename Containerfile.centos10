@@ -1,0 +1,101 @@
+# ============================================================================
+#  SDR Radio Resource Task Manager
+#  Unit Test Container  —  CentOS Stream 10
+#
+#  Build (from the sdr-v3/ directory):
+#    podman build -f Containerfile.centos10 -t sdr-controller:test .
+#
+#  Run (executes GTest suite and exits):
+#    podman run --rm sdr-controller:test
+#
+#  Run with verbose output:
+#    podman run --rm sdr-controller:test ctest --output-on-failure -V
+# ============================================================================
+
+FROM quay.io/centos/centos:stream10
+
+LABEL maintainer="SDR RF Systems"
+LABEL description="SDR Radio Resource Task Manager — CentOS Stream 10 unit test image"
+
+ENV HOME=/root
+WORKDIR /root
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 1 — Enable EPEL + CRB, install system packages
+# ─────────────────────────────────────────────────────────────────────────────
+RUN dnf install -y epel-release && \
+    dnf config-manager --enable crb && \
+    dnf update -y && \
+    dnf install -y \
+        gcc gcc-c++ make cmake ninja-build pkg-config \
+        git wget curl ca-certificates \
+        gdb strace lsof iproute procps-ng \
+        fftw-devel \
+        libuuid-devel \
+        qpid-proton-cpp-devel \
+        tinyxml2-devel \
+        fmt-devel \
+    && dnf clean all
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 2 — Build spdlog 1.13.0 from source
+# ─────────────────────────────────────────────────────────────────────────────
+RUN git clone --depth 1 --branch v1.13.0 \
+        https://github.com/gabime/spdlog.git /tmp/spdlog && \
+    cmake -S /tmp/spdlog -B /tmp/spdlog/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DSPDLOG_FMT_EXTERNAL=ON \
+        -DSPDLOG_BUILD_SHARED=OFF && \
+    cmake --build /tmp/spdlog/build --parallel "$(nproc)" --target spdlog && \
+    cmake --install /tmp/spdlog/build && \
+    rm -rf /tmp/spdlog
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 3 — Build SoapySDR 0.8.1 from source
+# ─────────────────────────────────────────────────────────────────────────────
+RUN git clone --depth 1 --branch soapy-sdr-0.8.1 \
+        https://github.com/pothosware/SoapySDR.git /tmp/SoapySDR && \
+    cmake -S /tmp/SoapySDR -B /tmp/SoapySDR/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DENABLE_PYTHON=OFF \
+        -DENABLE_PYTHON3=OFF && \
+    cmake --build /tmp/SoapySDR/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapySDR/build && \
+    rm -rf /tmp/SoapySDR
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 4 — Build SoapyRemote (needed by FakeSoapyDevice in tests)
+# ─────────────────────────────────────────────────────────────────────────────
+RUN git clone --depth 1 \
+        https://github.com/pothosware/SoapyRemote.git /tmp/SoapyRemote && \
+    cmake -S /tmp/SoapyRemote -B /tmp/SoapyRemote/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH=/usr/local && \
+    cmake --build /tmp/SoapyRemote/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapyRemote/build && \
+    rm -rf /tmp/SoapyRemote
+
+RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/local.conf && ldconfig
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STEP 5 — Copy source, build (includes unit test binary via add_subdirectory)
+# ─────────────────────────────────────────────────────────────────────────────
+COPY . /sdr
+
+RUN cp /sdr/CMakeLists.centos.txt /sdr/CMakeLists.txt && \
+    cp /sdr/client/CMakeLists.centos.txt /sdr/client/CMakeLists.txt
+
+RUN rm -rf /sdr/build && \
+    cmake -S /sdr -B /sdr/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -DSoapySDR_DIR=/usr/local/lib64/cmake/SoapySDR \
+    && cmake --build /sdr/build --parallel "$(nproc)"
+
+ENV LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib"
+WORKDIR /sdr/build
+
+CMD ["ctest", "--output-on-failure", "-V"]
