@@ -56,6 +56,7 @@ target_include_directories(sdr_tests PRIVATE
 )
 
 target_link_libraries(sdr_tests PRIVATE
+    sdr_task_api
     GTest::gtest_main
     SoapySDR
     ${PROTON_LIBRARIES}
@@ -64,7 +65,6 @@ target_link_libraries(sdr_tests PRIVATE
     ${FFTW3F_LIB}
     ${UUID_LIB}
     Threads::Threads
-    nlohmann_json::nlohmann_json
 )
 
 target_compile_definitions(sdr_tests PRIVATE

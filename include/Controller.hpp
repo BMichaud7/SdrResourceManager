@@ -5,7 +5,7 @@
 #include "ConfigParser.hpp"
 #include "ResourceManager.hpp"
 #include "AmqpClient.hpp"
-#include "MessageCodec.hpp"
+#include "sdr/MessageCodec.hpp"
 #include <memory>
 #include <thread>
 #include <atomic>

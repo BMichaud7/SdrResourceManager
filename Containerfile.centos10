@@ -1,21 +1,24 @@
 # ============================================================================
-#  SDR Radio Resource Task Manager
-#  Unit Test Container  —  CentOS Stream 10
+#  SdrResourceManager — Unit Test Container  (CentOS Stream 10)
 #
-#  Build (from the sdr-v3/ directory):
-#    podman build -f Containerfile.centos10 -t sdr-controller:test .
+#  Build context: parent directory (contains both SdrTaskApi/ and
+#  SdrResourceManager/).
 #
-#  Run (executes GTest suite and exits):
+#  Build (from parent directory):
+#    podman build -f SdrResourceManager/Containerfile.centos10 \
+#                 -t sdr-controller:test .
+#
+#  Run (exits 0 on pass):
 #    podman run --rm sdr-controller:test
 #
-#  Run with verbose output:
+#  Verbose:
 #    podman run --rm sdr-controller:test ctest --output-on-failure -V
 # ============================================================================
 
 FROM quay.io/centos/centos:stream10
 
 LABEL maintainer="SDR RF Systems"
-LABEL description="SDR Radio Resource Task Manager — CentOS Stream 10 unit test image"
+LABEL description="SdrResourceManager — CentOS Stream 10 unit test image"
 
 ENV HOME=/root
 WORKDIR /root
@@ -38,7 +41,7 @@ RUN dnf install -y epel-release && \
     && dnf clean all
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 2 — Build spdlog 1.13.0 from source
+#  STEP 2 — Build spdlog 1.13.0 from source (with external fmt)
 # ─────────────────────────────────────────────────────────────────────────────
 RUN git clone --depth 1 --branch v1.13.0 \
         https://github.com/gabime/spdlog.git /tmp/spdlog && \
@@ -81,21 +84,26 @@ RUN git clone --depth 1 \
 RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/local.conf && ldconfig
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 5 — Copy source, build (includes unit test binary via add_subdirectory)
+#  STEP 5 — Copy both sibling repos, then build
+#  SdrTaskApi is placed at ../SdrTaskApi relative to SdrResourceManager so
+#  the CMakeLists add_subdirectory(../SdrTaskApi ...) resolves correctly.
+#  nlohmann/json and GTest are fetched from GitHub during cmake configure.
 # ─────────────────────────────────────────────────────────────────────────────
-COPY . /sdr
+COPY SdrTaskApi/       /build/SdrTaskApi/
+COPY SdrResourceManager/ /build/SdrResourceManager/
 
-RUN cp /sdr/CMakeLists.centos.txt /sdr/CMakeLists.txt && \
-    cp /sdr/client/CMakeLists.centos.txt /sdr/client/CMakeLists.txt
+RUN cp /build/SdrResourceManager/CMakeLists.centos.txt \
+       /build/SdrResourceManager/CMakeLists.txt && \
+    cp /build/SdrResourceManager/client/CMakeLists.centos.txt \
+       /build/SdrResourceManager/client/CMakeLists.txt
 
-RUN rm -rf /sdr/build && \
-    cmake -S /sdr -B /sdr/build \
+RUN cmake -S /build/SdrResourceManager -B /build/SdrResourceManager/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH=/usr/local \
         -DSoapySDR_DIR=/usr/local/lib64/cmake/SoapySDR \
-    && cmake --build /sdr/build --parallel "$(nproc)"
+    && cmake --build /build/SdrResourceManager/build --parallel "$(nproc)"
 
 ENV LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib"
-WORKDIR /sdr/build
+WORKDIR /build/SdrResourceManager/build
 
 CMD ["ctest", "--output-on-failure", "-V"]

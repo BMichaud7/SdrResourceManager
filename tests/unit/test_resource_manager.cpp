@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "ResourceManager.hpp"
-#include "Types.hpp"
+#include "sdr/Types.hpp"
 #include "FakeSoapyControl.hpp"
 #include <chrono>
 #include <thread>

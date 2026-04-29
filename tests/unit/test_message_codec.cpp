@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "MessageCodec.hpp"
-#include "Types.hpp"
+#include "sdr/MessageCodec.hpp"
+#include "sdr/Types.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
 
@@ -276,4 +276,94 @@ TEST(MessageCodec, EncodeSnapshotResult) {
     EXPECT_EQ(j["device_id"], "fake-0");
     EXPECT_EQ(j["fft_size"],  4096);
     ASSERT_EQ(j["power_bins"].size(), 3u);
+}
+
+// ── rank field ────────────────────────────────────────────────────────────────
+
+TEST(MessageCodec, DecodeRankPropagates) {
+    std::string body = json{
+        {"msg_type",       "TASK_REQUEST_SCHEDULED"},
+        {"schema_version", "2.0"},
+        {"timestamp_ms",   nowMs()},
+        {"request_id",     "req-rank-rm"},
+        {"task_type",      "DF"},
+        {"priority",       8},
+        {"rank",           2},
+        {"schedule",       {{"mode","SCHEDULED"},
+                            {"start_time_epoch_ms", nowMs()+5000},
+                            {"end_time_epoch_ms",   nowMs()+65000}}},
+        {"rf", {{"center_freq_hz",915e6},{"bandwidth_hz",10e6},
+                {"sample_rate_sps",10e6},{"rx_count",1},{"tx_count",0}}},
+        {"streaming", {{"dest_ip","10.0.0.1"},{"dest_ports",{5000}}}}
+    }.dump();
+
+    auto req = MessageCodec::decode(body);
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->priority, 8);
+    EXPECT_EQ(req->rank,     2);
+}
+
+TEST(MessageCodec, DecodeRankDefaultsToZero) {
+    std::string body = json{
+        {"msg_type",       "TASK_REQUEST_SCHEDULED"},
+        {"schema_version", "2.0"},
+        {"timestamp_ms",   nowMs()},
+        {"request_id",     "req-rank-default"},
+        {"task_type",      "DF"},
+        {"schedule",       {{"mode","IMMEDIATE"}}},
+        {"rf", {{"center_freq_hz",915e6},{"bandwidth_hz",10e6},
+                {"sample_rate_sps",10e6},{"rx_count",1},{"tx_count",0}}},
+        {"streaming", {{"dest_ip","10.0.0.1"},{"dest_ports",{5000}}}}
+    }.dump();
+
+    auto req = MessageCodec::decode(body);
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->rank, 0);
+}
+
+TEST(MessageCodec, EncodeTaskStatusHasRank) {
+    TaskRecord rec;
+    rec.task_id      = "12345678";
+    rec.task_type    = TaskType::DF;
+    rec.schedule_mode= ScheduleMode::SCHEDULED;
+    rec.state        = TaskState::RUNNING;
+    rec.priority     = 8;
+    rec.rank         = 2;
+    rec.start_time_ms= nowMs();
+    rec.stop_time_ms = TIME_INFINITE;
+
+    auto j = json::parse(MessageCodec::encodeTaskStatus(rec, {}));
+    EXPECT_EQ(j["priority"], 8);
+    EXPECT_EQ(j["rank"],     2);
+}
+
+// ── scan_params key (canonical) ───────────────────────────────────────────────
+
+TEST(MessageCodec, DecodeScanWithScanParamsKey) {
+    std::string body = json{
+        {"msg_type",       "TASK_REQUEST_SCAN"},
+        {"schema_version", "2.0"},
+        {"timestamp_ms",   nowMs()},
+        {"request_id",     "req-scan-canonical"},
+        {"task_type",      "SCAN"},
+        {"schedule",       {{"mode","CONTINUOUS"}}},
+        {"rf", {{"center_freq_hz",433.92e6},{"bandwidth_hz",2e6},
+                {"sample_rate_sps",2e6},{"rx_count",1},{"tx_count",0},
+                {"rx_gain_db",{30.0}}}},
+        {"streaming", {{"dest_ip","127.0.0.1"},{"dest_ports",{5100}}}},
+        {"scan_params", {
+            {"repeat", true},
+            {"entries", {
+                {{"step",0},{"center_freq_hz",433.92e6},{"bandwidth_hz",2e6},
+                 {"sample_rate_sps",2e6},{"dwell_ms",500}}
+            }}
+        }}
+    }.dump();
+
+    auto req = MessageCodec::decode(body);
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->task_type, TaskType::SCAN);
+    ASSERT_TRUE(req->scan_params.has_value());
+    ASSERT_EQ(req->scan_params->entries.size(), 1u);
+    EXPECT_DOUBLE_EQ(req->scan_params->entries[0].center_freq_hz, 433.92e6);
 }

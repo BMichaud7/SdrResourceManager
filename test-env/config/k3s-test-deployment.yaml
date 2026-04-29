@@ -186,7 +186,7 @@ spec:
               value: info
             - name: LD_LIBRARY_PATH
               value: /usr/local/lib64:/usr/local/lib
-          command: ["/sdr/build/sdr_controller"]
+          command: ["/build/SdrResourceManager/build/sdr_controller"]
           args:  ["/etc/sdr-controller/devices.xml"]
           volumeMounts:
             - name: sdr-config-volume

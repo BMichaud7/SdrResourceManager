@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "IQStreamer.hpp"
-#include "Types.hpp"
+#include "sdr/Types.hpp"
 #include "FakeSoapyDevice.hpp"
 #include <SoapySDR/Formats.hpp>
 

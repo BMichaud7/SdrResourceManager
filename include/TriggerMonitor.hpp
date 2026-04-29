@@ -1,5 +1,5 @@
 #pragma once
-#include "Types.hpp"
+#include "sdr/Types.hpp"
 #include <SoapySDR/Device.hpp>
 #include <atomic>
 #include <thread>

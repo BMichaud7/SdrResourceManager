@@ -97,11 +97,11 @@ fi
 section "Manifest Apply"
 
 echo "  Applying k3s-test-deployment.yaml..."
-kubectl apply -f /sdr/test-env/config/k3s-test-deployment.yaml
+kubectl apply -f /build/SdrResourceManager/test-env/config/k3s-test-deployment.yaml
 
 # Dry-run the production manifest to validate its schema (no deploy)
 echo "  Dry-run validation of production k8s/deployment.yaml..."
-if kubectl apply --dry-run=client -f /sdr/k8s/deployment.yaml >/dev/null 2>&1; then
+if kubectl apply --dry-run=client -f /build/SdrResourceManager/k8s/deployment.yaml >/dev/null 2>&1; then
     pass "Production k8s/deployment.yaml passes dry-run validation"
 else
     fail "Production k8s/deployment.yaml dry-run failed"

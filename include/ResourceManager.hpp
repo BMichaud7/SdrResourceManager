@@ -4,7 +4,7 @@
 //  The scheduling brain. Owns all SpectrumTimelines, RadioDevices,
 //  UdpPortPool, and the TaskRegistry.
 // ════════════════════════════════════════════════════════════════════════
-#include "Types.hpp"
+#include "sdr/Types.hpp"
 #include "ConfigParser.hpp"
 #include "SpectrumTimeline.hpp"
 #include "UdpPortPool.hpp"

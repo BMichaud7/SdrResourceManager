@@ -1,5 +1,5 @@
 #include "ResourceManager.hpp"
-#include "MessageCodec.hpp"
+#include "sdr/MessageCodec.hpp"
 #include <spdlog/spdlog.h>
 #include <uuid/uuid.h>
 #include <algorithm>

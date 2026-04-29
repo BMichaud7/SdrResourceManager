@@ -1,18 +1,25 @@
 # ============================================================================
-#  SDR Radio Resource Task Manager
-#  k3s Integration Test Container  —  CentOS Stream 10
+#  SdrResourceManager — k3s Integration Test Container  (CentOS Stream 10)
 #
 #  Deploys the controller via k3s (single-node Kubernetes), applies the
 #  real k8s manifests (adapted for test), and runs AMQP smoke tests.
 #
 #  Requires --privileged because k3s needs it.
-#  Requires the controller image as a mounted tar (avoids nested container
-#  build complexity — the host saves it, the test container imports it).
+#  Requires the controller image as a mounted tar (built separately from
+#  the unit-test image so the k3s test can import a known-good binary).
 #
-#  Build:
-#    podman build -f Containerfile.centos10 -t sdr-controller:test .
-#    podman save sdr-controller:test -o /tmp/sdr-controller.tar
-#    podman build -f Containerfile.k3s-test -t sdr-controller:k3s-test .
+#  Build context: parent directory (contains both SdrTaskApi/ and
+#  SdrResourceManager/).
+#
+#  Build order (from parent directory):
+#    1. Build + save the controller image:
+#         podman build -f SdrResourceManager/Containerfile.centos10 \
+#                      -t sdr-controller:test .
+#         podman save sdr-controller:test -o /tmp/sdr-controller.tar
+#
+#    2. Build this test image:
+#         podman build -f SdrResourceManager/Containerfile.k3s-test \
+#                      -t sdr-controller:k3s-test .
 #
 #  Run:
 #    podman run --rm --privileged \
@@ -22,7 +29,7 @@
 
 FROM quay.io/centos/centos:stream10
 
-LABEL description="SDR Radio Resource Task Manager — k3s integration test"
+LABEL description="SdrResourceManager — k3s integration test"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 1 — System packages
@@ -70,20 +77,26 @@ RUN git clone --depth 1 \
 RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/local.conf && ldconfig
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 3 — Build sdr_client (used by test script to send AMQP requests)
+#  STEP 3 — Copy both sibling repos, build sdr_client
 # ─────────────────────────────────────────────────────────────────────────────
-COPY . /sdr
-RUN cp /sdr/CMakeLists.centos.txt /sdr/CMakeLists.txt && \
-    cp /sdr/client/CMakeLists.centos.txt /sdr/client/CMakeLists.txt
-RUN cmake -S /sdr -B /sdr/build \
+COPY SdrTaskApi/       /build/SdrTaskApi/
+COPY SdrResourceManager/ /build/SdrResourceManager/
+
+RUN cp /build/SdrResourceManager/CMakeLists.centos.txt \
+       /build/SdrResourceManager/CMakeLists.txt && \
+    cp /build/SdrResourceManager/client/CMakeLists.centos.txt \
+       /build/SdrResourceManager/client/CMakeLists.txt
+
+RUN cmake -S /build/SdrResourceManager -B /build/SdrResourceManager/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH=/usr/local \
         -DSoapySDR_DIR=/usr/local/lib64/cmake/SoapySDR && \
-    cmake --build /sdr/build --parallel "$(nproc)" && \
-    install -m 755 /sdr/build/client/sdr_client /usr/local/bin/sdr_client
+    cmake --build /build/SdrResourceManager/build --parallel "$(nproc)" && \
+    install -m 755 /build/SdrResourceManager/build/client/sdr_client \
+                   /usr/local/bin/sdr_client
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 4 — Install k3s (single-binary Kubernetes distribution)
+#  STEP 4 — Install k3s
 # ─────────────────────────────────────────────────────────────────────────────
 ARG K3S_VERSION=v1.31.4+k3s1
 RUN curl -sfL \
@@ -94,8 +107,7 @@ RUN curl -sfL \
 
 ENV LD_LIBRARY_PATH="/usr/local/lib64:/usr/local/lib"
 
-COPY test-env/scripts/test_k3s.sh /usr/local/bin/test_k3s.sh
-COPY test-env/config/k3s-test-deployment.yaml /sdr/test-env/config/k3s-test-deployment.yaml
+COPY SdrResourceManager/test-env/scripts/test_k3s.sh /usr/local/bin/test_k3s.sh
 RUN chmod +x /usr/local/bin/test_k3s.sh
 
 CMD ["/usr/local/bin/test_k3s.sh"]

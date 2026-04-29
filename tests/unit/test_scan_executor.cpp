@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "ScanExecutor.hpp"
-#include "Types.hpp"
+#include "sdr/Types.hpp"
 #include <atomic>
 #include <chrono>
 #include <mutex>

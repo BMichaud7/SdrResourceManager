@@ -165,3 +165,124 @@ TEST(SpectrumTimeline, IndepLo_NonOverlappingTimesAllowReuse) {
     ASSERT_TRUE(r.ok);
     EXPECT_EQ(r.avail_rx, (std::vector<int>{0, 1}));
 }
+
+// ── Time boundary edge cases ──────────────────────────────────────────────────
+
+TEST(SpectrumTimeline, AdjacentWindowsDoNotConflict) {
+    // Slot ends at t=30000; new slot starts at t=30000 — no overlap.
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("t1", 0, 30'000, CF, SR, CF - 2e6, CF + 2e6, {0}));
+
+    auto r = tl.canFit(30'000, 60'000, 2400e6, BW, 20e6, 1, 0, MRX, MTX, G);
+    EXPECT_TRUE(r.ok) << "Touching (non-overlapping) time windows should not conflict";
+}
+
+TEST(SpectrumTimeline, OneMillisecondOverlapCausesConflict) {
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("t1", 0, 30'001, CF, SR, CF - 2e6, CF + 2e6, {0}));
+
+    // Starts 1 ms before t1 ends: [30000, 60000) overlaps [0, 30001) by 1 ms.
+    auto r = tl.canFit(30'000, 60'000, 2400e6, BW, 20e6, 1, 0, MRX, MTX, G);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.reject_code, RejectCode::RETUNE_CONFLICT);
+}
+
+TEST(SpectrumTimeline, InfiniteStopTimeBlocksAllFutureTasks) {
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("t1", 0, TIME_INFINITE, CF, SR, CF - 2e6, CF + 2e6, {0, 1}));
+
+    // Any future time window overlaps with an infinite slot.
+    auto r = tl.canFit(1'000'000, 2'000'000, CF, BW, SR, 1, 0, MRX, MTX, G);
+    EXPECT_FALSE(r.ok);
+}
+
+TEST(SpectrumTimeline, InfiniteStopTimeSlotCanBeRemoved) {
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("t1", 0, TIME_INFINITE, CF, SR, CF - 2e6, CF + 2e6, {0, 1}));
+    ASSERT_FALSE(tl.canFit(1000, 2000, CF, BW, SR, 1, 0, MRX, MTX, G).ok);
+
+    tl.remove("t1");
+    EXPECT_TRUE(tl.canFit(1000, 2000, CF, BW, SR, 1, 0, MRX, MTX, G).ok);
+}
+
+TEST(SpectrumTimeline, RemoveNonexistentIdIsSafe) {
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("t1", 0, 60'000, CF, SR, CF - 2e6, CF + 2e6, {0}));
+
+    EXPECT_NO_THROW(tl.remove("does-not-exist"));
+    // Existing slot is unaffected.
+    EXPECT_EQ(tl.slotCount(), 1);
+}
+
+// ── slotCount and slotsOverlapping ────────────────────────────────────────────
+
+TEST(SpectrumTimeline, SlotCountTracksInsertAndRemove) {
+    SpectrumTimeline tl;
+    EXPECT_EQ(tl.slotCount(), 0);
+
+    tl.insert(makeSlot("t1", 0, 60'000, CF, SR, CF - 2e6, CF + 2e6, {0}));
+    EXPECT_EQ(tl.slotCount(), 1);
+
+    tl.insert(makeSlot("t2", 0, 60'000, CF, SR, CF + 2.5e6, CF + 3.5e6, {1}));
+    EXPECT_EQ(tl.slotCount(), 2);
+
+    tl.remove("t1");
+    EXPECT_EQ(tl.slotCount(), 1);
+
+    tl.remove("t2");
+    EXPECT_EQ(tl.slotCount(), 0);
+}
+
+TEST(SpectrumTimeline, SlotsOverlappingReturnsOnlyOverlapping) {
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("early", 0,      30'000,  CF, SR, CF - 2e6, CF + 2e6, {0}));
+    tl.insert(makeSlot("mid",   15'000, 45'000,  CF, SR, CF + 2.5e6, CF + 3.5e6, {1}));
+    tl.insert(makeSlot("late",  40'000, 70'000,  CF, SR, CF - 2e6, CF + 2e6, {0}));
+
+    // Query [14000, 16000) — overlaps "early" and "mid", not "late"
+    auto overlapping = tl.slotsOverlapping(14'000, 16'000);
+    EXPECT_EQ(overlapping.size(), 2u);
+
+    // Query [60000, 80000) — only "late"
+    overlapping = tl.slotsOverlapping(60'000, 80'000);
+    ASSERT_EQ(overlapping.size(), 1u);
+    EXPECT_EQ(overlapping[0].task_id, "late");
+
+    // Query [100000, 200000) — none
+    overlapping = tl.slotsOverlapping(100'000, 200'000);
+    EXPECT_TRUE(overlapping.empty());
+}
+
+// ── Guard band ────────────────────────────────────────────────────────────────
+
+TEST(SpectrumTimeline, GuardBandPreventsImmediatelyAdjacentSlice) {
+    SpectrumTimeline tl;
+    // First slot occupies [CF-2M, CF+2M].
+    tl.insert(makeSlot("t1", 0, 60'000, CF, SR, CF - 2e6, CF + 2e6, {0}));
+
+    // New slice starts exactly where t1 ends (CF+2M) — within guard band G=200kHz.
+    auto r = tl.canFit(0, 60'000, CF, 1e6, SR, 1, 0, MRX, MTX, G);
+    // The canFit must place the new slice with at least G Hz gap; if no room, reject.
+    // With SR=10M and used [CF-2M..CF+2M] plus guard, there's room on the other side.
+    if (r.ok) {
+        EXPECT_GE(r.placed_lo, CF + 2e6 + G);
+    }
+    // Either fits on the other side or rejects with SPECTRUM_CONFLICT — both valid.
+    if (!r.ok) {
+        EXPECT_EQ(r.reject_code, RejectCode::SPECTRUM_CONFLICT);
+    }
+}
+
+// ── allocatedBw edge cases ────────────────────────────────────────────────────
+
+TEST(SpectrumTimeline, AllocatedBwIsZeroWhenNoActiveSlots) {
+    SpectrumTimeline tl;
+    EXPECT_DOUBLE_EQ(tl.allocatedBw(999'999), 0.0);
+}
+
+TEST(SpectrumTimeline, AllocatedBwExcludesExpiredSlots) {
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("t1", 0, 1000, CF, SR, CF - 2e6, CF + 2e6, {0}));
+    EXPECT_NEAR(tl.allocatedBw(500),  4e6, 1.0);
+    EXPECT_DOUBLE_EQ(tl.allocatedBw(1000), 0.0);  // slot ends at t=1000 (exclusive)
+}

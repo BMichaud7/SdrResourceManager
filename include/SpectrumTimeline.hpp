@@ -4,7 +4,7 @@
 //  Per-device 2D time×frequency reservation manager.
 //  Thread-safe. canFit() is read-only (never mutates).
 // ════════════════════════════════════════════════════════════
-#include "Types.hpp"
+#include "sdr/Types.hpp"
 #include <vector>
 #include <mutex>
 #include <optional>

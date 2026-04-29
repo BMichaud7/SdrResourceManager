@@ -19,6 +19,13 @@ add_link_options(
     $<$<CONFIG:Debug>:-fsanitize=undefined>
 )
 
+# ── SdrTaskApi (shared task types + codec — sibling repo) ────────────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrTaskApi/CMakeLists.txt")
+    add_subdirectory(../SdrTaskApi ${CMAKE_BINARY_DIR}/SdrTaskApi)
+else()
+    find_package(sdr_task_api REQUIRED)
+endif()
+
 # ── PkgConfig ────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
 
@@ -58,18 +65,6 @@ if(NOT fmt_FOUND)
     target_link_libraries(fmt::fmt INTERFACE ${FMT_LIBRARIES})
 endif()
 
-# ── nlohmann/json ─────────────────────────────────────────────────────────────
-find_package(nlohmann_json 3.11 QUIET)
-if(NOT nlohmann_json_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        nlohmann_json
-        GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG        v3.11.3
-    )
-    FetchContent_MakeAvailable(nlohmann_json)
-endif()
-
 # ── FFTW3 single-precision ────────────────────────────────────────────────────
 find_library(FFTW3F_LIB NAMES fftw3f REQUIRED)
 find_path(FFTW3_INCLUDE NAMES fftw3.h REQUIRED)
@@ -95,6 +90,7 @@ target_include_directories(sdr_controller PRIVATE
 )
 
 target_link_libraries(sdr_controller PRIVATE
+    sdr_task_api
     SoapySDR
     ${PROTON_LIBRARIES}
     ${TINYXML2_LIBRARIES}
@@ -103,7 +99,6 @@ target_link_libraries(sdr_controller PRIVATE
     ${FFTW3F_LIB}
     ${UUID_LIB}
     Threads::Threads
-    nlohmann_json::nlohmann_json
 )
 
 target_compile_definitions(sdr_controller PRIVATE
