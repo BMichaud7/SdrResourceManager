@@ -39,6 +39,7 @@ TEST(MessageCodec, DecodeTaskRequestScheduled) {
         {"correlation_id", "corr-abc"},
         {"task_type",      "DF"},
         {"priority",       7},
+        {"rank",           2},
         {"schedule", {
             {"mode",                "SCHEDULED"},
             {"start_time_epoch_ms", start},
@@ -90,6 +91,7 @@ TEST(MessageCodec, DecodeTaskRequestContinuous) {
         {"timestamp_ms",   nowMs()},
         {"request_id",     "req-cont-001"},
         {"task_type",      "NARROWBAND"},
+        {"rank",           0},
         {"schedule",       {{"mode","CONTINUOUS"}}},
         {"rf", {
             {"center_freq_hz",  162400000.0},
@@ -121,6 +123,7 @@ TEST(MessageCodec, DecodeTaskRequestScan) {
         {"timestamp_ms",   nowMs()},
         {"request_id",     "req-scan-001"},
         {"task_type",      "WIDEBAND"},
+        {"rank",           1},
         {"schedule",       {{"mode","CONTINUOUS"}}},
         {"scan", {
             {"repeat",   true},
@@ -152,6 +155,7 @@ TEST(MessageCodec, DecodeTaskRequestSnapshot) {
         {"schema_version", "2.0"},
         {"timestamp_ms",   nowMs()},
         {"request_id",     "req-snap-001"},
+        {"rank",           0},
         {"snapshot", {
             {"center_freq_hz",  2400e6},
             {"bandwidth_hz",    20e6},
@@ -303,12 +307,13 @@ TEST(MessageCodec, DecodeRankPropagates) {
     EXPECT_EQ(req->rank,     2);
 }
 
-TEST(MessageCodec, DecodeRankDefaultsToZero) {
+TEST(MessageCodec, DecodeRankMissingReturnsNullopt) {
+    // rank is now required — omitting it must reject the message
     std::string body = json{
         {"msg_type",       "TASK_REQUEST_SCHEDULED"},
         {"schema_version", "2.0"},
         {"timestamp_ms",   nowMs()},
-        {"request_id",     "req-rank-default"},
+        {"request_id",     "req-rank-missing"},
         {"task_type",      "DF"},
         {"schedule",       {{"mode","IMMEDIATE"}}},
         {"rf", {{"center_freq_hz",915e6},{"bandwidth_hz",10e6},
@@ -317,8 +322,7 @@ TEST(MessageCodec, DecodeRankDefaultsToZero) {
     }.dump();
 
     auto req = MessageCodec::decode(body);
-    ASSERT_TRUE(req.has_value());
-    EXPECT_EQ(req->rank, 0);
+    EXPECT_FALSE(req.has_value()) << "Missing rank must be rejected";
 }
 
 TEST(MessageCodec, EncodeTaskStatusHasRank) {
@@ -339,6 +343,59 @@ TEST(MessageCodec, EncodeTaskStatusHasRank) {
 
 // ── scan_params key (canonical) ───────────────────────────────────────────────
 
+// ── Additional edge cases ─────────────────────────────────────────────────────
+
+TEST(MessageCodec, DecodeEmptyBodyReturnsNullopt) {
+    EXPECT_FALSE(MessageCodec::decode("").has_value());
+}
+
+TEST(MessageCodec, DecodeUnknownMsgTypeIsDecodable) {
+    std::string body = json{
+        {"msg_type",       "FUTURE_MSG"},
+        {"schema_version", "2.0"},
+        {"timestamp_ms",   nowMs()},
+        {"request_id",     "req-future"},
+        {"rank",           0}
+    }.dump();
+    auto req = MessageCodec::decode(body);
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->msg_type, "FUTURE_MSG");
+    EXPECT_EQ(req->request_id, "req-future");
+}
+
+TEST(MessageCodec, EncodeTaskStatusTerminalReason) {
+    TaskRecord rec;
+    rec.task_id         = "task-failed-001";
+    rec.task_type       = TaskType::NARROWBAND;
+    rec.schedule_mode   = ScheduleMode::CONTINUOUS;
+    rec.state           = TaskState::FAILED;
+    rec.priority        = 5;
+    rec.rank            = 1;
+    rec.start_time_ms   = nowMs();
+    rec.stop_time_ms    = nowMs();
+    rec.terminal_reason = "device error";
+
+    auto j = json::parse(MessageCodec::encodeTaskStatus(rec, {}));
+    EXPECT_EQ(j["state"],           "FAILED");
+    EXPECT_EQ(j["terminal_reason"], "device error");
+}
+
+TEST(MessageCodec, EncodeTaskStatusCompletedState) {
+    TaskRecord rec;
+    rec.task_id       = "task-done-001";
+    rec.task_type     = TaskType::WIDEBAND;
+    rec.schedule_mode = ScheduleMode::SCHEDULED;
+    rec.state         = TaskState::COMPLETED;
+    rec.priority      = 3;
+    rec.rank          = 0;
+    rec.start_time_ms = nowMs();
+    rec.stop_time_ms  = nowMs();
+
+    auto j = json::parse(MessageCodec::encodeTaskStatus(rec, {}));
+    EXPECT_EQ(j["state"], "COMPLETED");
+    EXPECT_EQ(j["task_type"], "WIDEBAND");
+}
+
 TEST(MessageCodec, DecodeScanWithScanParamsKey) {
     std::string body = json{
         {"msg_type",       "TASK_REQUEST_SCAN"},
@@ -346,6 +403,7 @@ TEST(MessageCodec, DecodeScanWithScanParamsKey) {
         {"timestamp_ms",   nowMs()},
         {"request_id",     "req-scan-canonical"},
         {"task_type",      "SCAN"},
+        {"rank",           0},
         {"schedule",       {{"mode","CONTINUOUS"}}},
         {"rf", {{"center_freq_hz",433.92e6},{"bandwidth_hz",2e6},
                 {"sample_rate_sps",2e6},{"rx_count",1},{"tx_count",0},

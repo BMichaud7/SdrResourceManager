@@ -155,3 +155,88 @@ TEST(ConfigParser, FileNotFoundThrows) {
     EXPECT_THROW(ConfigParser::parse("/nonexistent/path/config.xml"),
                  std::runtime_error);
 }
+
+// ── Edge cases ────────────────────────────────────────────────────────────────
+
+static const std::string kSingleDeviceXml = R"xml(<?xml version="1.0"?>
+<sdr_controller version="2.0">
+  <broker>
+    <url>amqp://broker:5672</url>
+    <username>u</username>
+    <password>p</password>
+    <request_queue>sdr.task.request</request_queue>
+    <response_queue>sdr.task.response</response_queue>
+    <status_topic>sdr.status</status_topic>
+    <health_topic>sdr.health</health_topic>
+    <reconnect_interval_sec>5</reconnect_interval_sec>
+    <max_reconnect_interval_sec>60</max_reconnect_interval_sec>
+    <send_queue_depth>128</send_queue_depth>
+  </broker>
+  <policy>
+    <udp_port_pool_start>30000</udp_port_pool_start>
+    <udp_port_pool_end>30099</udp_port_pool_end>
+    <retune_conflict_policy>REJECT_NEW</retune_conflict_policy>
+  </policy>
+  <devices>
+    <device id="dev-only">
+      <driver>null</driver>
+      <uri>null</uri>
+      <label>Only device</label>
+      <streaming_source_ip>127.0.0.1</streaming_source_ip>
+      <capabilities>
+        <rx_channels>1</rx_channels>
+        <tx_channels>0</tx_channels>
+        <freq_min_hz>70000000</freq_min_hz>
+        <freq_max_hz>6000000000</freq_max_hz>
+        <bandwidth_max_hz>10000000</bandwidth_max_hz>
+        <sample_rate_max_sps>10000000</sample_rate_max_sps>
+        <rx_gain_min_db>0</rx_gain_min_db>
+        <rx_gain_max_db>50</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>0</tx_atten_max_db>
+      </capabilities>
+    </device>
+  </devices>
+</sdr_controller>
+)xml";
+
+TEST(ConfigParser, RejectNewPolicyParsed) {
+    auto cfg = ConfigParser::parse(writeTmp(kSingleDeviceXml));
+    EXPECT_EQ(cfg.policy.retune_conflict_policy, RetuneConflictPolicy::REJECT_NEW);
+}
+
+TEST(ConfigParser, SingleDeviceParsed) {
+    auto cfg = ConfigParser::parse(writeTmp(kSingleDeviceXml));
+    ASSERT_EQ(cfg.devices.size(), 1u);
+    EXPECT_EQ(cfg.devices[0].id,     "dev-only");
+    EXPECT_EQ(cfg.devices[0].driver, "null");
+    EXPECT_EQ(cfg.devices[0].caps.rx_channels, 1);
+    EXPECT_EQ(cfg.devices[0].caps.tx_channels, 0);
+}
+
+TEST(ConfigParser, DeviceWithoutCoherencyGroupHasEmptyGroup) {
+    // kSingleDeviceXml has no <coherency_group> element.
+    auto cfg = ConfigParser::parse(writeTmp(kSingleDeviceXml));
+    ASSERT_EQ(cfg.devices.size(), 1u);
+    EXPECT_TRUE(cfg.devices[0].coherency_group.empty());
+}
+
+TEST(ConfigParser, BrokerQueueNamesPreserved) {
+    auto cfg = ConfigParser::parse(writeTmp(kValidXml));
+    EXPECT_EQ(cfg.broker.request_queue,  "sdr.task.request");
+    EXPECT_EQ(cfg.broker.response_queue, "sdr.task.response");
+    EXPECT_EQ(cfg.broker.status_topic,   "sdr.status");
+    EXPECT_EQ(cfg.broker.health_topic,   "sdr.health");
+}
+
+TEST(ConfigParser, DefaultTaskTimeoutMsIsPositive) {
+    auto cfg = ConfigParser::parse(writeTmp(kValidXml));
+    EXPECT_GT(cfg.policy.default_task_timeout_ms, 0);
+}
+
+TEST(ConfigParser, DeviceFreqRangeParsed) {
+    auto cfg = ConfigParser::parse(writeTmp(kValidXml));
+    ASSERT_GE(cfg.devices.size(), 1u);
+    EXPECT_DOUBLE_EQ(cfg.devices[0].caps.freq_min_hz,  70e6);
+    EXPECT_DOUBLE_EQ(cfg.devices[0].caps.freq_max_hz,  6000e6);
+}

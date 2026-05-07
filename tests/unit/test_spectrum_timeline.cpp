@@ -265,7 +265,11 @@ TEST(SpectrumTimeline, GuardBandPreventsImmediatelyAdjacentSlice) {
     // The canFit must place the new slice with at least G Hz gap; if no room, reject.
     // With SR=10M and used [CF-2M..CF+2M] plus guard, there's room on the other side.
     if (r.ok) {
-        EXPECT_GE(r.placed_lo, CF + 2e6 + G);
+        // Slice must clear the guard zone on whichever side it was placed
+        bool right_side = r.placed_lo >= CF + 2e6 + G;
+        bool left_side  = r.placed_hi <= CF - 2e6 - G;
+        EXPECT_TRUE(right_side || left_side)
+            << "placed slice overlaps t1 guard zone";
     }
     // Either fits on the other side or rejects with SPECTRUM_CONFLICT — both valid.
     if (!r.ok) {

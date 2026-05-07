@@ -118,6 +118,8 @@ private:
                         const std::string& reason);
     void notifyStateChange(const std::string& task_id);
 
+    bool tryPreemptConflicting(const TaskRequest& req, int64_t t_start, int64_t t_stop);
+
     std::string makeStreamId(const std::string& task_id, const std::string& type,
                              const std::string& dev_id, int ch_idx) const;
 

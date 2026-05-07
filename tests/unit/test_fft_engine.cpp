@@ -130,3 +130,46 @@ TEST(FftEngine, PlanReallocatedForDifferentFftSize) {
     EXPECT_EQ((int)r1.power_bins.size(), 256);
     EXPECT_EQ((int)r2.power_bins.size(), 512);
 }
+
+// ── Edge cases ────────────────────────────────────────────────────────────────
+
+TEST(FftEngine, AllZeroInputSucceeds) {
+    // Zero samples must not crash; output bins should be defined (very negative dB).
+    FftEngine eng;
+    const int fft_size = 256;
+    std::vector<float> zeros((size_t)fft_size * 2, 0.0f);
+    auto r = eng.compute(zeros, fft_size, 1, 915e6, 10e6, 10e6, "dev-0");
+    ASSERT_TRUE(r.success);
+    EXPECT_EQ((int)r.power_bins.size(), fft_size);
+}
+
+TEST(FftEngine, FreqAxisSymmetricAroundCenter) {
+    // When sample_rate == 2 * bandwidth_hz the axis runs center±bw.
+    FftEngine eng;
+    const int fft_size = 256;
+    const double center = 1000e6, sr = 20e6, bw = 10e6;
+    std::vector<float> s((size_t)fft_size * 2, 0.0f);
+    auto r = eng.compute(s, fft_size, 1, center, sr, bw, "dev-0");
+    ASSERT_TRUE(r.success);
+
+    EXPECT_NEAR(r.freq_axis_start_hz, center - bw, 1.0);
+    double end = r.freq_axis_start_hz + fft_size * r.freq_resolution_hz;
+    EXPECT_NEAR(end, center + bw, 1.0);
+}
+
+TEST(FftEngine, DeviceIdCarriedThrough) {
+    FftEngine eng;
+    std::vector<float> s((size_t)128 * 2, 0.0f);
+    auto r = eng.compute(s, 128, 1, 433e6, 5e6, 5e6, "radio-7");
+    ASSERT_TRUE(r.success);
+    EXPECT_EQ(r.device_id, "radio-7");
+}
+
+TEST(FftEngine, ZeroAveragesReturnsFail) {
+    FftEngine eng;
+    const int fft_size = 256;
+    std::vector<float> s((size_t)fft_size * 2, 0.5f);
+    // n_avg = 0 means no frames to process — should fail gracefully.
+    auto r = eng.compute(s, fft_size, 0, 915e6, 10e6, 10e6, "dev-0");
+    EXPECT_FALSE(r.success);
+}

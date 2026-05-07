@@ -152,3 +152,43 @@ TEST(ScanExecutor, CurrentStepReflectsProgress) {
 
     EXPECT_GE(max_step.load(), 4);  // 0-indexed steps 0..4
 }
+
+// ── Edge cases ────────────────────────────────────────────────────────────────
+
+TEST(ScanExecutor, SingleEntryNonRepeatFiresDone) {
+    std::atomic<bool> done{false};
+    std::atomic<bool> ok_val{false};
+
+    ScanExecutor exec("task-single", makeParams(1, false, 1),
+        [](double, double) { return true; },
+        {},
+        [&](const std::string&, bool ok) { ok_val = ok; done = true; });
+    exec.start();
+
+    EXPECT_TRUE(waitFor([&] { return done.load(); }));
+    EXPECT_TRUE(ok_val.load());
+}
+
+TEST(ScanExecutor, StopBeforeStartIsHarmless) {
+    ScanExecutor exec("task-prestop", makeParams(2, false, 10),
+        [](double, double) { return true; },
+        {},
+        [](const std::string&, bool) {});
+    EXPECT_NO_THROW(exec.stop());
+    EXPECT_FALSE(exec.isRunning());
+}
+
+TEST(ScanExecutor, RetuneCalledExactlyOncePerStep) {
+    std::atomic<int> retune_count{0};
+    std::atomic<bool> done{false};
+
+    // 4 entries, single pass
+    ScanExecutor exec("task-retune-count", makeParams(4, false, 1),
+        [&](double, double) { ++retune_count; return true; },
+        {},
+        [&](const std::string&, bool) { done = true; });
+    exec.start();
+
+    ASSERT_TRUE(waitFor([&] { return done.load(); }));
+    EXPECT_EQ(retune_count.load(), 4);
+}

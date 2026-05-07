@@ -6,7 +6,7 @@
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/SdrResourceManager.git
+git clone https://github.com/BMichaud7/SdrResourceManager.git
 cd SdrResourceManager
 ./setup.sh          # guided setup: config, build, broker
 ```
@@ -79,6 +79,19 @@ falls outside the union of all loaded device ranges.
 belong to the same `coherency_group`. A DF task can request channels
 coherently across all boards in a group by setting `coherency_group` in
 the `rf` block.
+
+**Rank-based preemption**: every task request carries an integer `rank` field
+(required — requests without it are rejected at decode time).  When a new task
+cannot fit because lower-rank tasks are occupying the spectrum, the controller
+cancels those tasks and accepts the new one.  The displaced tasks receive a
+`TASK_STATUS` notification with `state = CANCELLED` and
+`terminal_reason = "PREEMPTED_BY_HIGHER_RANK rank=N request=<id>"`.
+
+| Rule | Behaviour |
+|------|-----------|
+| `rank == 0` | Never preempts anything (default for background tasks) |
+| `new.rank <= existing.rank` | Normal rejection — no preemption |
+| `new.rank > existing.rank` | All blocking lower-rank tasks on the target device are cancelled, then the new task is accepted |
 
 ---
 
@@ -370,7 +383,7 @@ apt-get install -y \
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/YOUR_USERNAME/SdrResourceManager.git
+git clone https://github.com/BMichaud7/SdrResourceManager.git
 cd sdr-controller
 
 # 2. Configure (Release build)
@@ -410,8 +423,8 @@ cmake --build build-debug --parallel $(nproc)
 podman build -f Containerfile.centos10 -t sdr-controller:test .
 
 # Production Docker image
-docker build -t ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0 .
-docker push ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0
+docker build -t ghcr.io/BMichaud7/sdr-controller:2.1.0 .
+docker push ghcr.io/BMichaud7/sdr-controller:2.1.0
 ```
 
 ---
@@ -419,7 +432,7 @@ docker push ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0
 ## 9. Running Tests
 
 All unit tests use GoogleTest and run without hardware via `FakeSoapyDevice`, an
-in-process SoapySDR driver registered as `driver=fake`. Tests cover 121 cases across
+in-process SoapySDR driver registered as `driver=fake`. Tests cover 162 cases across
 all subsystems. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what each test file covers.
 
 ### Run tests locally (Ubuntu)
@@ -442,13 +455,13 @@ podman run --rm sdr-controller:test ctest --output-on-failure -V  # verbose
 
 | Test file | Subsystem | Key scenarios |
 |---|---|---|
-| `test_spectrum_timeline.cpp` | SpectrumTimeline | shared/independent LO, retune conflict, canFit logic |
-| `test_message_codec.cpp` | MessageCodec | all request/response encode+decode |
-| `test_config_parser.cpp` | ConfigParser | XML parsing, error cases |
-| `test_udp_port_pool.cpp` | UdpPortPool | alloc/release/exhaustion |
-| `test_resource_manager.cpp` | ResourceManager | scheduling, coherent DF, hardware profiles |
+| `test_spectrum_timeline.cpp` | SpectrumTimeline | shared/independent LO, retune conflict, canFit logic, guard band |
+| `test_message_codec.cpp` | MessageCodec | all request/response encode+decode; required rank enforcement |
+| `test_config_parser.cpp` | ConfigParser | XML parsing, policy fields, error cases |
+| `test_udp_port_pool.cpp` | UdpPortPool | alloc/release/exhaustion, double-release safety |
+| `test_resource_manager.cpp` | ResourceManager | scheduling, coherent DF, hardware profiles, **rank preemption** |
 | `test_iq_streamer.cpp` | IQStreamer | packet headers, sequence numbers, overflow flag, error callback |
-| `test_fft_engine.cpp` | FftEngine | tone peaks, averaging, plan lifecycle |
+| `test_fft_engine.cpp` | FftEngine | tone peaks, averaging, plan lifecycle, zero-average rejection |
 | `test_scan_executor.cpp` | ScanExecutor | step order, done callback, repeat mode, stop |
 | `test_trigger_monitor.cpp` | TriggerMonitor | threshold trigger, max_captures, done callback |
 
@@ -651,10 +664,10 @@ kubectl create configmap sdr-config \
 
 ```bash
 # Edit k8s/deployment.yaml:
-# image: ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0
+# image: ghcr.io/BMichaud7/sdr-controller:2.1.0
 
-docker build -t ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0 .
-docker push ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0
+docker build -t ghcr.io/BMichaud7/sdr-controller:2.1.0 .
+docker push ghcr.io/BMichaud7/sdr-controller:2.1.0
 ```
 
 ### Step 5: Deploy
@@ -785,7 +798,7 @@ kubectl logs -f deployment/sdr-controller -n sdr-system
 ```bash
 # From inside a DSP pod or using the example client:
 kubectl run sdr-client --rm -it --restart=Never \
-    --image=ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0 \
+    --image=ghcr.io/BMichaud7/sdr-controller:2.1.0 \
     --namespace=sdr-system \
     -- sdr_client amqp://activemq-service:5672 10.0.1.10
 ```
@@ -844,6 +857,7 @@ task_req = {
     "timestamp_ms": int(time.time()*1000),
     "request_id": str(uuid.uuid4()),
     "task_type": "NARROWBAND",
+    "rank": 1,                          # required; 0 = lowest priority
     "schedule": {"mode": "CONTINUOUS"},
     "rf": {
         "center_freq_hz": 162400000.0,

@@ -41,6 +41,11 @@ All public `ResourceManager` methods take `std::lock_guard<std::mutex> lock(mu_)
 The single registry mutex (`reg_mu_`) protects the task registry separately from the
 scheduling mutex (`mu_`) to avoid holding the big lock during SoapySDR I/O.
 
+**Rank preemption locking**: `tryPreemptConflicting()` acquires `reg_mu_` briefly to
+snapshot the task IDs to preempt, then releases it before calling `deactivateTask()`
+(which acquires `reg_mu_` internally). This avoids deadlock while keeping the
+check-then-act window safe — only one AMQP thread runs `tryAccept()` at a time.
+
 ---
 
 ## 3. Request Lifecycle
@@ -66,6 +71,10 @@ Controller::onMessage()         dispatch on msg_type
                 └─ single-device path
                         │
                         ├─ findBestDevice()        capacity + freq/bw/sr range check
+                        ├─ (if no fit AND req.rank > 0) tryPreemptConflicting()
+                        │    └─ for each device: slotsOverlapping() → check all rank < req.rank
+                        │       → deactivateTask(CANCELLED, "PREEMPTED_BY_HIGHER_RANK …")
+                        │    └─ retry findBestDevice() after preemption
                         ├─ SpectrumTimeline::canFit()   2D time×freq reservation check
                         ├─ UdpPortPool::allocateN()     port allocation
                         ├─ SpectrumTimeline::insert()   commit reservation

@@ -89,7 +89,7 @@ AppConfig ConfigParser::parse(const std::string& path) {
         dc.uri                 = req(d,"uri");
         dc.label               = opt(d,"label",dc.id.c_str());
         dc.streaming_source_ip = opt(d,"streaming_source_ip","127.0.0.1");
-        dc.coherency_group     = opt(d,"coherency_group","default");
+        dc.coherency_group     = opt(d,"coherency_group","");
         { std::string sl = opt(d,"shared_lo","true");
           dc.shared_lo = (sl != "false" && sl != "0"); }
         auto* c = d->FirstChildElement("capabilities");

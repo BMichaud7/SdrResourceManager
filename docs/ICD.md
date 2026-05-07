@@ -76,6 +76,49 @@ Every message in both directions MUST include:
 }
 ```
 
+### 4.1 Required `rank` field for task requests
+
+All task-creation messages (`TASK_REQUEST_*`) **MUST** include a top-level `rank` field.
+Requests that omit it are rejected by the decoder — no `TASK_RESPONSE` is sent and an
+AMQP warn-level log entry is generated.
+
+```json
+{
+  "msg_type":   "TASK_REQUEST_CONTINUOUS",
+  "rank":       1,
+  ...
+}
+```
+
+| Value | Semantics |
+|-------|-----------|
+| `0` | Lowest tier — never preempts anything; can be displaced by any rank > 0 task |
+| `1`–`N` | Higher numbers take precedence over lower numbers on the same device |
+
+`TASK_STOP`, `TASK_CANCEL`, and `HEALTH_QUERY` do **not** carry `rank`.
+
+### 4.2 Rank-based preemption
+
+When a new task cannot fit on any available device because lower-rank tasks occupy the
+required spectrum or channels, the controller:
+
+1. Identifies all blocking tasks whose `rank < new_task.rank`
+2. Cancels each one with `terminal_reason = "PREEMPTED_BY_HIGHER_RANK rank=N request=<id>"`
+3. Re-evaluates device fit — accepts the new task if it now fits
+
+If any blocking task has `rank >= new_task.rank`, the entire device is skipped
+(preemption is all-or-nothing per device). If no device can be cleared, the request
+is rejected with `reject_code = NO_DEVICE_AVAILABLE`.
+
+Preempted tasks receive a `TASK_STATUS` event (see §8.8) with:
+
+```json
+{
+  "state":           "CANCELLED",
+  "terminal_reason": "PREEMPTED_BY_HIGHER_RANK rank=3 request=550e8400-..."
+}
+```
+
 ---
 
 ## 5. MSG_TYPE ENUMERATION
@@ -171,6 +214,7 @@ until `start_time_epoch_ms` is reached, then begins streaming.
   "correlation_id": "df-job-001",
   "task_type":      "DF",
   "priority":       7,
+  "rank":           2,
   "schedule": {
     "mode":                "SCHEDULED",
     "start_time_epoch_ms": 1700001000000,
@@ -212,6 +256,7 @@ Starts now. Same as SCHEDULED with `schedule.mode = "IMMEDIATE"`.
   "request_id":     "660e8400-e29b-41d4-a716-446655440001",
   "task_type":      "NARROWBAND",
   "priority":       5,
+  "rank":           1,
   "schedule": {
     "mode":               "IMMEDIATE",
     "end_time_epoch_ms":  1700000300000
@@ -249,6 +294,7 @@ Runs indefinitely until `TASK_STOP` is received. No `end_time_epoch_ms`.
   "timestamp_ms":   1700000000000,
   "request_id":     "770e8400-e29b-41d4-a716-446655440002",
   "task_type":      "WIDEBAND",
+  "rank":           0,
   "schedule":       { "mode": "CONTINUOUS" },
   "rf": {
     "center_freq_hz":  2400000000.0,
@@ -285,6 +331,7 @@ center frequency. The `scan` block replaces the `rf` block.
   "timestamp_ms":   1700000000000,
   "request_id":     "880e8400-e29b-41d4-a716-446655440003",
   "task_type":      "WIDEBAND",
+  "rank":           0,
   "schedule":       { "mode": "CONTINUOUS" },
   "scan": {
     "repeat":   true,
@@ -556,6 +603,9 @@ stream metrics while the task is RUNNING.
   "state":                 "RUNNING",
   "task_type":             "DF",
   "schedule_mode":         "SCHEDULED",
+  "priority":              7,
+  "rank":                  2,
+  "terminal_reason":       "",
   "device_ids":            ["pluto-0"],
   "actual_start_epoch_ms": 1700001000000,
   "actual_stop_epoch_ms":  1700001060000,
@@ -593,7 +643,11 @@ stream metrics while the task is RUNNING.
 **State values**: `EVALUATING` → `SCHEDULED` → `PENDING` → `RUNNING` → `COMPLETING`
 → `COMPLETED` | `FAILED` | `CANCELLED`
 
-See §9 for full lifecycle description.
+When `state = CANCELLED` due to rank preemption, `terminal_reason` is set to
+`"PREEMPTED_BY_HIGHER_RANK rank=N request=<id>"`.  Clients that need to distinguish
+preemption from operator cancellation should check this field.
+
+See §4.2 for rank preemption rules and §9 for the full lifecycle state machine.
 
 ### 8.14 SNAPSHOT_RESULT
 
@@ -1340,3 +1394,4 @@ TriggerMonitor reads SoapySDR stream continuously:
 | 1.0     | Initial: scheduled/continuous/stop                                         |
 | 2.0     | Add scan, snapshot, triggered, calibration; UDP format; multi-device; full reject codes |
 | 2.1     | Add TASK_STATUS, DEVICE_HEALTH, CONTROLLER_HEALTH, HEALTH_QUERY_RESPONSE definitions; task lifecycle state machine; full scenarios section; `shared_lo` coherence mode; `coherency_group` cross-board DF |
+| 2.2     | **`rank` field required** on all `TASK_REQUEST_*` messages; rank-based preemption (§4.2); `terminal_reason` and `rank` fields added to `TASK_STATUS`; `priority` field added to `TASK_STATUS` |

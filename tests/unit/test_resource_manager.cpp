@@ -953,3 +953,165 @@ TEST(ResourceManager, Routing_FallsBackToOtherDeviceWhenPreferredFull) {
     ASSERT_TRUE(r2.accepted);
     EXPECT_EQ(r2.streams[0].device_id, dev2);
 }
+
+// ── Rank preemption tests ─────────────────────────────────────────────────────
+
+TEST(ResourceManager, Rank_HigherRankTaskPreemptsLowerRankContinuousTask) {
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    // Occupy both RX channels with a rank=0 task
+    auto req_low = makeContinuous("req-low", 915e6, 5e6, 10e6, 2);
+    req_low.rank = 0;
+    auto r_low = rm.tryAccept(req_low);
+    ASSERT_TRUE(r_low.accepted);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(rm.countByState(TaskState::RUNNING), 1);
+
+    // Higher-rank task needs 1 channel at the same freq — preempts the rank=0 task
+    auto req_high = makeContinuous("req-high", 915e6, 5e6, 10e6, 1);
+    req_high.rank = 2;
+    auto r_high = rm.tryAccept(req_high);
+    ASSERT_TRUE(r_high.accepted);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    EXPECT_EQ(rm.countByState(TaskState::RUNNING),   1);
+    EXPECT_EQ(rm.countByState(TaskState::CANCELLED), 1);
+
+    rm.stopTask(r_high.task_id, "s1", "done");
+}
+
+TEST(ResourceManager, Rank_EqualRankDoesNotPreempt) {
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto req1 = makeContinuous("req-1", 915e6, 5e6, 10e6, 2);
+    req1.rank = 1;
+    auto r1 = rm.tryAccept(req1);
+    ASSERT_TRUE(r1.accepted);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // Same rank — must NOT preempt
+    auto req2 = makeContinuous("req-2", 915e6, 5e6, 10e6, 1);
+    req2.rank = 1;
+    auto r2 = rm.tryAccept(req2);
+    EXPECT_FALSE(r2.accepted);
+    EXPECT_EQ(rm.countByState(TaskState::RUNNING),   1);
+    EXPECT_EQ(rm.countByState(TaskState::CANCELLED), 0);
+
+    rm.stopTask(r1.task_id, "s1", "done");
+}
+
+TEST(ResourceManager, Rank_ZeroRankNewTaskDoesNotPreempt) {
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto req1 = makeContinuous("req-1", 915e6, 5e6, 10e6, 2);
+    req1.rank = 0;
+    auto r1 = rm.tryAccept(req1);
+    ASSERT_TRUE(r1.accepted);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // rank=0 must never trigger preemption
+    auto req2 = makeContinuous("req-2", 915e6, 5e6, 10e6, 1);
+    req2.rank = 0;
+    auto r2 = rm.tryAccept(req2);
+    EXPECT_FALSE(r2.accepted);
+    EXPECT_EQ(r2.reject_code, RejectCode::NO_DEVICE_AVAILABLE);
+    EXPECT_EQ(rm.countByState(TaskState::RUNNING),   1);
+    EXPECT_EQ(rm.countByState(TaskState::CANCELLED), 0);
+
+    rm.stopTask(r1.task_id, "s1", "done");
+}
+
+TEST(ResourceManager, Rank_LowerRankCannotPreemptHigherRankTask) {
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    // High-rank task occupies both channels
+    auto req_high = makeContinuous("req-high", 915e6, 5e6, 10e6, 2);
+    req_high.rank = 5;
+    auto r_high = rm.tryAccept(req_high);
+    ASSERT_TRUE(r_high.accepted);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // Lower-rank task (rank=2) must not preempt the rank=5 task
+    auto req_low = makeContinuous("req-low", 915e6, 5e6, 10e6, 1);
+    req_low.rank = 2;
+    auto r_low = rm.tryAccept(req_low);
+    EXPECT_FALSE(r_low.accepted);
+    EXPECT_EQ(rm.countByState(TaskState::RUNNING),   1);
+    EXPECT_EQ(rm.countByState(TaskState::CANCELLED), 0);
+
+    rm.stopTask(r_high.task_id, "s1", "done");
+}
+
+TEST(ResourceManager, Rank_PreemptedTaskTerminalReasonContainsPreemptedString) {
+    FakeSoapy::reset();
+    std::vector<TaskRecord> state_changes;
+    std::mutex mu;
+    auto on_change = [&](const TaskRecord& r) {
+        std::lock_guard lk(mu);
+        state_changes.push_back(r);
+    };
+    ResourceManager rm(makeTestConfig(), on_change, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto req_low = makeContinuous("req-low", 915e6, 5e6, 10e6, 2);
+    req_low.rank = 0;
+    auto r_low = rm.tryAccept(req_low);
+    ASSERT_TRUE(r_low.accepted);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    auto req_high = makeContinuous("req-high", 915e6, 5e6, 10e6, 1);
+    req_high.rank = 5;
+    auto r_high = rm.tryAccept(req_high);
+    ASSERT_TRUE(r_high.accepted);
+
+    // Find the CANCELLED state change for the low-rank task
+    {
+        std::lock_guard lk(mu);
+        auto it = std::find_if(state_changes.begin(), state_changes.end(),
+            [&](const TaskRecord& r) {
+                return r.task_id == r_low.task_id && r.state == TaskState::CANCELLED;
+            });
+        ASSERT_NE(it, state_changes.end()) << "Low-rank task should be cancelled";
+        EXPECT_NE(it->terminal_reason.find(PREEMPT_TERMINAL_REASON), std::string::npos)
+            << "terminal_reason must contain PREEMPT_TERMINAL_REASON";
+        EXPECT_TRUE(isPreempted(*it));
+    }  // release mu before stopTask to avoid deadlock via notifyStateChange callback
+
+    rm.stopTask(r_high.task_id, "s1", "done");
+}
+
+TEST(ResourceManager, Rank_TaskRecordCarriesRankFromRequest) {
+    FakeSoapy::reset();
+    std::vector<TaskRecord> records;
+    std::mutex mu;
+    auto on_change = [&](const TaskRecord& r) {
+        std::lock_guard lk(mu);
+        records.push_back(r);
+    };
+    ResourceManager rm(makeTestConfig(), on_change, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto req = makeContinuous("req-rank7", 915e6, 5e6, 10e6, 1);
+    req.rank = 7;
+    auto resp = rm.tryAccept(req);
+    ASSERT_TRUE(resp.accepted);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    {
+        std::lock_guard lk(mu);
+        auto it = std::find_if(records.begin(), records.end(),
+            [&](const TaskRecord& r) { return r.task_id == resp.task_id; });
+        ASSERT_NE(it, records.end());
+        EXPECT_EQ(it->rank, 7);
+    }  // release mu before stopTask to avoid deadlock via notifyStateChange callback
+
+    rm.stopTask(resp.task_id, "s1", "done");
+}

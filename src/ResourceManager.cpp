@@ -208,6 +208,7 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
         rec.task_type      = req.task_type;
         rec.schedule_mode  = req.schedule_mode;
         rec.priority       = req.priority;
+        rec.rank           = req.rank;
         rec.start_time_ms  = t_start;
         rec.stop_time_ms   = t_stop;
         rec.allocations    = std::move(allocs);
@@ -347,6 +348,12 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
     auto candidate = findBestDevice(
         req.rf.center_freq_hz, req.rf.bandwidth_hz, req.rf.sample_rate_sps,
         req.rf.rx_count, req.rf.tx_count, t_start, t_stop, req.rf.preferred_device);
+
+    if (!candidate && req.rank > 0 && tryPreemptConflicting(req, t_start, t_stop)) {
+        candidate = findBestDevice(
+            req.rf.center_freq_hz, req.rf.bandwidth_hz, req.rf.sample_rate_sps,
+            req.rf.rx_count, req.rf.tx_count, t_start, t_stop, req.rf.preferred_device);
+    }
 
     if (!candidate) {
         resp.reject_code   = RejectCode::NO_DEVICE_AVAILABLE;
@@ -621,6 +628,8 @@ TaskResponse ResourceManager::doAcceptCalibration(const TaskRequest& req) {
     rec.request_id   = req.request_id;
     rec.task_type    = TaskType::CALIBRATION;
     rec.schedule_mode= ScheduleMode::IMMEDIATE;
+    rec.priority     = req.priority;
+    rec.rank         = req.rank;
     rec.start_time_ms= t_start;
     rec.stop_time_ms = t_stop;
     rec.streaming    = req.streaming;
@@ -672,6 +681,54 @@ TaskResponse ResourceManager::doAcceptCalibration(const TaskRequest& req) {
     activateTask(task_id);
     notifyStateChange(task_id);
     return resp;
+}
+
+// ── Rank-based preemption ────────────────────────────────────────────────
+bool ResourceManager::tryPreemptConflicting(const TaskRequest& req,
+                                             int64_t t_start, int64_t t_stop)
+{
+    const std::string reason = std::string(PREEMPT_TERMINAL_REASON) +
+                               " rank=" + std::to_string(req.rank) +
+                               " request=" + req.request_id;
+
+    for (auto& [dev_id, tl] : timelines_) {
+        auto& dev = devices_.at(dev_id);
+        if (!dev->isOnline()) continue;
+
+        const auto& caps = dev->config().caps;
+        if (req.rf.center_freq_hz < caps.freq_min_hz ||
+            req.rf.center_freq_hz > caps.freq_max_hz) continue;
+        if (req.rf.bandwidth_hz    > caps.bandwidth_max_hz)    continue;
+        if (req.rf.sample_rate_sps > caps.sample_rate_max_sps) continue;
+        if (req.rf.rx_count        > caps.rx_channels)         continue;
+        if (req.rf.tx_count        > caps.tx_channels)         continue;
+
+        auto overlapping = tl->slotsOverlapping(t_start, t_stop);
+        if (overlapping.empty()) continue;
+
+        std::vector<std::string> to_preempt;
+        bool can_preempt = true;
+        {
+            std::lock_guard lock(reg_mu_);
+            for (auto& slot : overlapping) {
+                auto it = registry_.find(slot.task_id);
+                if (it == registry_.end()) continue;
+                if (isTerminalState(it->second.state)) continue;
+                if (it->second.rank >= req.rank) { can_preempt = false; break; }
+                to_preempt.push_back(slot.task_id);
+            }
+        }
+
+        if (can_preempt && !to_preempt.empty()) {
+            for (auto& tid : to_preempt) {
+                spdlog::info("ResourceManager: preempting {} for rank={} request={}",
+                             tid, req.rank, req.request_id);
+                deactivateTask(tid, TaskState::CANCELLED, reason);
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 // ── Stop / Cancel ────────────────────────────────────────────────────────

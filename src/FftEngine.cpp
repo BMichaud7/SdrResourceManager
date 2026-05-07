@@ -48,6 +48,9 @@ SnapshotResult FftEngine::compute(
     r.freq_axis_start_hz=cf_hz-sr_sps/2.0;
     r.freq_axis_step_hz=r.freq_resolution_hz;
 
+    if (n_avg <= 0) {
+        r.error_msg="n_averages must be > 0"; return r;
+    }
     if ((int)s.size()<fft_size*n_avg*2) {
         r.error_msg="Insufficient samples"; return r;
     }
