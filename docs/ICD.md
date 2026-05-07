@@ -1,6 +1,6 @@
 # INTERFACE CONTROL DOCUMENT (ICD)
 ## SDR Radio Resource Task Manager
-### Document: SDR-RRTM-ICD-002  |  Version: 2.1  |  Status: Released
+### Document: SDR-RRTM-ICD-002  |  Version: 2.2  |  Status: Released
 
 ---
 

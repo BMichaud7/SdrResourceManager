@@ -1,5 +1,5 @@
 # SDR Radio Resource Task Manager
-## Version 2.1 — Production Deployment Guide
+## Version 2.2 — Production Deployment Guide
 
 ---
 
@@ -484,8 +484,8 @@ cmake --build build-debug --parallel $(nproc)
 podman build -f Containerfile.centos10 -t sdr-controller:test .
 
 # Production Docker image
-docker build -t ghcr.io/BMichaud7/sdr-controller:2.1.0 .
-docker push ghcr.io/BMichaud7/sdr-controller:2.1.0
+docker build -t ghcr.io/BMichaud7/sdr-controller:2.2.0 .
+docker push ghcr.io/BMichaud7/sdr-controller:2.2.0
 ```
 
 ---
@@ -569,7 +569,7 @@ export SDR_LOG_LEVEL=debug
 
 Expected output:
 ```
-[2024-01-01 12:00:00.000] [info] SDR Radio Resource Task Manager v2.1.0
+[2024-01-01 12:00:00.000] [info] SDR Radio Resource Task Manager v2.2.0
 [2024-01-01 12:00:00.010] [info] Config: config/devices.xml
 [2024-01-01 12:00:00.050] [info] [pluto-0] Opening: driver=remote uri=soapy://192.168.10.100:55132
 [2024-01-01 12:00:01.200] [info] [pluto-0] OK hw=AD9361 drv=remote
@@ -725,10 +725,10 @@ kubectl create configmap sdr-config \
 
 ```bash
 # Edit k8s/deployment.yaml:
-# image: ghcr.io/BMichaud7/sdr-controller:2.1.0
+# image: ghcr.io/BMichaud7/sdr-controller:2.2.0
 
-docker build -t ghcr.io/BMichaud7/sdr-controller:2.1.0 .
-docker push ghcr.io/BMichaud7/sdr-controller:2.1.0
+docker build -t ghcr.io/BMichaud7/sdr-controller:2.2.0 .
+docker push ghcr.io/BMichaud7/sdr-controller:2.2.0
 ```
 
 ### Step 5: Deploy
@@ -859,7 +859,7 @@ kubectl logs -f deployment/sdr-controller -n sdr-system
 ```bash
 # From inside a DSP pod or using the example client:
 kubectl run sdr-client --rm -it --restart=Never \
-    --image=ghcr.io/BMichaud7/sdr-controller:2.1.0 \
+    --image=ghcr.io/BMichaud7/sdr-controller:2.2.0 \
     --namespace=sdr-system \
     -- sdr_client amqp://activemq-service:5672 10.0.1.10
 ```
@@ -1013,4 +1013,4 @@ Monitor via health topic. If `temperature_c > 70°C`:
 ## Support and Contact
 
 This system is designed and maintained by the SDR Engineering Team.
-For issues, file a ticket referencing the ICD document version (SDR-RRTM-ICD-002 v2.1).
+For issues, file a ticket referencing the ICD document version (SDR-RRTM-ICD-002 v2.2).
