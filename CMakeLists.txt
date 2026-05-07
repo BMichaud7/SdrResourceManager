@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(sdr_controller VERSION 2.0.0 LANGUAGES CXX)
+project(sdr_controller VERSION 2.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ── Compiler flags ───────────────────────────────────────────────────────────
+# ── Compiler flags ────────────────────────────────────────────────────────────
 add_compile_options(
     -Wall -Wextra -Wpedantic
     -Wno-unused-parameter
@@ -19,38 +19,75 @@ add_link_options(
     $<$<CONFIG:Debug>:-fsanitize=undefined>
 )
 
-# ── SdrTaskApi (shared task types + codec — sibling repo) ────────────────────
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrTaskApi/CMakeLists.txt")
-    add_subdirectory(../SdrTaskApi ${CMAKE_BINARY_DIR}/SdrTaskApi)
-else()
-    find_package(sdr_task_api REQUIRED)
-endif()
-
-# ── PkgConfig ────────────────────────────────────────────────────────────────
+# ── PkgConfig ─────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
 
-# ── SoapySDR ─────────────────────────────────────────────────────────────────
-find_package(SoapySDR REQUIRED)
+# ── SdrTaskApi ────────────────────────────────────────────────────────────────
+# Expected as a sibling directory: ../SdrTaskApi  (same parent as this repo).
+# Falls back to a system-installed cmake package.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrTaskApi/CMakeLists.txt")
+    message(STATUS "SdrTaskApi: using sibling source at ../SdrTaskApi")
+    add_subdirectory(../SdrTaskApi ${CMAKE_BINARY_DIR}/SdrTaskApi)
+else()
+    find_package(sdr_task_api QUIET)
+    if(NOT sdr_task_api_FOUND)
+        message(FATAL_ERROR
+            "\n[SdrResourceManager] SdrTaskApi not found.\n"
+            "  Option 1 — clone as a sibling directory (recommended):\n"
+            "    git clone https://github.com/BMichaud7/SdrTaskApi.git "
+            "$(dirname $(pwd))/SdrTaskApi\n"
+            "  Option 2 — install system-wide and set sdr_task_api_DIR.\n"
+            "  Both repos must share the same parent directory for "
+            "the sibling path to resolve automatically.\n")
+    endif()
+    message(STATUS "SdrTaskApi: using installed package ${sdr_task_api_VERSION}")
+endif()
+
+# ── SoapySDR ──────────────────────────────────────────────────────────────────
+find_package(SoapySDR QUIET)
+if(NOT SoapySDR_FOUND)
+    message(FATAL_ERROR
+        "\n[SdrResourceManager] SoapySDR not found.\n"
+        "  Ubuntu/Debian : sudo apt-get install libsoapysdr-dev soapysdr-module-remote\n"
+        "  CentOS/RHEL   : build from source — see Containerfile.centos10 for the exact steps\n"
+        "  Or set SoapySDR_DIR to the directory containing SoapySDRConfig.cmake\n")
+endif()
 
 # ── qpid-proton C++ (AMQP 1.0) ───────────────────────────────────────────────
-# Try pkg-config first; fall back to find_library when transitive .pc files
-# are absent (common on some Ubuntu installations).
-pkg_check_modules(PROTON libqpid-proton-cpp)
+pkg_check_modules(PROTON QUIET libqpid-proton-cpp)
 if(NOT PROTON_FOUND)
-    find_library(PROTON_CPP_LIB NAMES qpid-proton-cpp REQUIRED)
-    find_path(PROTON_INCLUDE_DIR NAMES proton/connection.hpp REQUIRED)
+    find_library(PROTON_CPP_LIB NAMES qpid-proton-cpp)
+    find_path(PROTON_INCLUDE_DIR NAMES proton/connection.hpp)
+    if(NOT PROTON_CPP_LIB OR NOT PROTON_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "\n[SdrResourceManager] qpid-proton C++ not found.\n"
+            "  Ubuntu/Debian : sudo apt-get install libqpid-proton-cpp12-dev\n"
+            "  CentOS/RHEL   : sudo dnf install qpid-proton-cpp-devel\n")
+    endif()
     set(PROTON_LIBRARIES    ${PROTON_CPP_LIB})
     set(PROTON_INCLUDE_DIRS ${PROTON_INCLUDE_DIR})
     message(STATUS "qpid-proton-cpp found via find_library: ${PROTON_CPP_LIB}")
 endif()
 
-# ── TinyXML2 ─────────────────────────────────────────────────────────────────
-pkg_check_modules(TINYXML2 REQUIRED tinyxml2)
+# ── TinyXML2 ──────────────────────────────────────────────────────────────────
+pkg_check_modules(TINYXML2 QUIET tinyxml2)
+if(NOT TINYXML2_FOUND)
+    message(FATAL_ERROR
+        "\n[SdrResourceManager] tinyxml2 not found.\n"
+        "  Ubuntu/Debian : sudo apt-get install libtinyxml2-dev\n"
+        "  CentOS/RHEL   : sudo dnf install tinyxml2-devel\n")
+endif()
 
-# ── spdlog ───────────────────────────────────────────────────────────────────
+# ── spdlog ────────────────────────────────────────────────────────────────────
 find_package(spdlog QUIET)
 if(NOT spdlog_FOUND)
-    pkg_check_modules(SPDLOG REQUIRED spdlog)
+    pkg_check_modules(SPDLOG QUIET spdlog)
+    if(NOT SPDLOG_FOUND)
+        message(FATAL_ERROR
+            "\n[SdrResourceManager] spdlog not found.\n"
+            "  Ubuntu/Debian : sudo apt-get install libspdlog-dev\n"
+            "  CentOS/RHEL   : build from source — see Containerfile.centos10\n")
+    endif()
     add_library(spdlog::spdlog INTERFACE IMPORTED)
     target_include_directories(spdlog::spdlog INTERFACE ${SPDLOG_INCLUDE_DIRS})
     target_link_libraries(spdlog::spdlog INTERFACE ${SPDLOG_LIBRARIES})
@@ -59,19 +96,37 @@ endif()
 # ── fmt ───────────────────────────────────────────────────────────────────────
 find_package(fmt QUIET)
 if(NOT fmt_FOUND)
-    pkg_check_modules(FMT REQUIRED fmt)
+    pkg_check_modules(FMT QUIET fmt)
+    if(NOT FMT_FOUND)
+        message(FATAL_ERROR
+            "\n[SdrResourceManager] {fmt} not found.\n"
+            "  Ubuntu/Debian : sudo apt-get install libfmt-dev\n"
+            "  CentOS/RHEL   : sudo dnf install fmt-devel\n")
+    endif()
     add_library(fmt::fmt INTERFACE IMPORTED)
     target_include_directories(fmt::fmt INTERFACE ${FMT_INCLUDE_DIRS})
     target_link_libraries(fmt::fmt INTERFACE ${FMT_LIBRARIES})
 endif()
 
 # ── FFTW3 single-precision ────────────────────────────────────────────────────
-find_library(FFTW3F_LIB NAMES fftw3f REQUIRED)
-find_path(FFTW3_INCLUDE NAMES fftw3.h REQUIRED)
+find_library(FFTW3F_LIB NAMES fftw3f)
+find_path(FFTW3_INCLUDE NAMES fftw3.h)
+if(NOT FFTW3F_LIB OR NOT FFTW3_INCLUDE)
+    message(FATAL_ERROR
+        "\n[SdrResourceManager] FFTW3 (single-precision) not found.\n"
+        "  Ubuntu/Debian : sudo apt-get install libfftw3-dev\n"
+        "  CentOS/RHEL   : sudo dnf install fftw-devel\n")
+endif()
 
 # ── libuuid ───────────────────────────────────────────────────────────────────
-find_library(UUID_LIB NAMES uuid REQUIRED)
-find_path(UUID_INCLUDE NAMES uuid/uuid.h REQUIRED)
+find_library(UUID_LIB NAMES uuid)
+find_path(UUID_INCLUDE NAMES uuid/uuid.h)
+if(NOT UUID_LIB OR NOT UUID_INCLUDE)
+    message(FATAL_ERROR
+        "\n[SdrResourceManager] libuuid not found.\n"
+        "  Ubuntu/Debian : sudo apt-get install uuid-dev\n"
+        "  CentOS/RHEL   : sudo dnf install libuuid-devel\n")
+endif()
 
 # ── Threads ───────────────────────────────────────────────────────────────────
 find_package(Threads REQUIRED)
@@ -116,3 +171,20 @@ add_subdirectory(tests)
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS sdr_controller DESTINATION bin)
 install(FILES config/devices.xml DESTINATION etc/sdr-controller)
+
+# ── Configure summary ─────────────────────────────────────────────────────────
+message(STATUS "")
+message(STATUS "┌─ SdrResourceManager (sdr_controller) ${PROJECT_VERSION} ───────┐")
+message(STATUS "│  C++ standard : C++20                                  │")
+message(STATUS "│  Build type   : ${CMAKE_BUILD_TYPE}                           ")
+message(STATUS "│  Dependencies :                                        │")
+message(STATUS "│    SdrTaskApi    : FOUND (sibling or installed)        │")
+message(STATUS "│    SoapySDR      : FOUND ${SoapySDR_VERSION}                    ")
+message(STATUS "│    qpid-proton   : FOUND                               │")
+message(STATUS "│    tinyxml2      : FOUND ${TINYXML2_VERSION}                    ")
+message(STATUS "│    spdlog        : FOUND                               │")
+message(STATUS "│    fftw3f        : FOUND ${FFTW3F_LIB}                          ")
+message(STATUS "│    libuuid       : FOUND                               │")
+message(STATUS "│    googletest    : test-only (system or FetchContent)  │")
+message(STATUS "└────────────────────────────────────────────────────────┘")
+message(STATUS "")

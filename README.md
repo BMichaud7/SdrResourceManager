@@ -6,6 +6,8 @@
 ## Quick Start
 
 ```bash
+# Clone all three sibling repos under the same parent directory
+git clone https://github.com/BMichaud7/SdrTaskApi.git
 git clone https://github.com/BMichaud7/SdrResourceManager.git
 cd SdrResourceManager
 ./setup.sh          # guided setup: config, build, broker
@@ -323,6 +325,28 @@ Do not apply more than the board's specified maximum input power to any RX port.
 
 ## 7. Software Dependencies
 
+### Repository layout — required sibling structure
+
+SdrResourceManager depends on [SdrTaskApi](https://github.com/BMichaud7/SdrTaskApi)
+for shared types and the AMQP message codec. CMake detects it automatically when both
+repos share the same parent directory:
+
+```
+parent/
+├── SdrTaskApi/           ← https://github.com/BMichaud7/SdrTaskApi
+├── SdrResourceManager/   ← this repo
+└── AcquisitionApp/       ← optional — https://github.com/BMichaud7/AcquisitionApp
+```
+
+If SdrTaskApi is not found as a sibling, CMake falls back to a system-installed
+`sdr_task_api` cmake package.  If neither is available, the configure step fails with:
+
+```
+[SdrResourceManager] SdrTaskApi not found.
+  Option 1 — clone as a sibling directory (recommended):
+    git clone https://github.com/BMichaud7/SdrTaskApi.git ../SdrTaskApi
+```
+
 ### On SDR hardware nodes (bare metal)
 
 ```bash
@@ -362,6 +386,21 @@ systemctl enable --now soapy-server
 ```
 
 ### On the build machine
+
+All dependencies are **required** unless marked optional. CMake prints a `FATAL_ERROR`
+with the exact install command if any required package is missing.
+
+| Package | Purpose | Fallback |
+|---------|---------|---------|
+| `SdrTaskApi` | Shared types + AMQP codec | Sibling dir or installed package |
+| `libsoapysdr-dev` | SDR hardware abstraction | None — must be installed |
+| `libqpid-proton-cpp12-dev` | AMQP 1.0 transport | None — must be installed |
+| `libtinyxml2-dev` | `devices.xml` config parser | None — must be installed |
+| `nlohmann-json3-dev` | JSON encode/decode | Auto-fetched via FetchContent |
+| `libspdlog-dev` + `libfmt-dev` | Structured logging | Auto-fetched or pkg-config |
+| `libfftw3-dev` | FFT for snapshot tasks | None — must be installed |
+| `uuid-dev` | Task UUID generation | None — must be installed |
+| `googletest` | Unit tests | Auto-fetched via FetchContent |
 
 ```bash
 # Ubuntu 24.04
