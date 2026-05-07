@@ -420,20 +420,42 @@ apt-get install -y \
 
 ## 8. Building from Source
 
+### Using build.sh (recommended)
+
+`build.sh` automatically clones `SdrTaskApi` as a sibling if it is not already
+present, then configures and builds.
+
+```bash
+git clone https://github.com/BMichaud7/SdrResourceManager.git
+cd SdrResourceManager
+
+./build.sh             # Release build — clones SdrTaskApi automatically
+./build.sh --tests     # Release build + run all 162 unit tests
+./build.sh --debug     # Debug build (AddressSanitizer + UBSan)
+./build.sh --clean     # Wipe build/ and rebuild from scratch
+./build.sh --no-clone  # Skip git-clone (SdrTaskApi already present)
+./build.sh --help      # All options
+```
+
+### Manual CMake build
+
 ```bash
 # 1. Clone the repository
 git clone https://github.com/BMichaud7/SdrResourceManager.git
-cd sdr-controller
+cd SdrResourceManager
 
-# 2. Configure (Release build)
+# 2. Clone SdrTaskApi sibling (if not already present)
+git clone https://github.com/BMichaud7/SdrTaskApi.git ../SdrTaskApi
+
+# 3. Configure (Release build)
 cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/opt/sdr-controller
 
-# 3. Build
+# 4. Build
 cmake --build build --parallel $(nproc)
 
-# 4. Install (optional, or run directly from build/)
+# 5. Install (optional, or run directly from build/)
 cmake --install build
 
 # Binaries produced:
