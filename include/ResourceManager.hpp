@@ -81,16 +81,25 @@ private:
     mutable std::mutex                             reg_mu_;
     std::unordered_map<std::string, TaskRecord>    registry_;
 
+    // Per-channel hardware state: one entry per open SoapySDR channel.
+    // Shared across tasks that multicast from the same physical channel.
+    // Guarded by rt_mu_.
+    struct ChannelState {
+        RadioDevice*       device       = nullptr;
+        SoapySDR::Stream*  soapy_stream = nullptr;
+        std::shared_ptr<IQStreamer> streamer;
+    };
+    std::unordered_map<std::string, ChannelState> channel_states_; // key="dev_id:ch"
+
     // Live streaming objects (per task)
     struct TaskRuntime {
-        // Each entry is {owning RadioDevice, SoapySDR stream}.
-        // Stored as pairs so deactivation can close each stream on its own device,
-        // which matters for multi-device coherent tasks.
+        // SoapySDR streams this task owns or references (used for trigger monitor
+        // and stream close on last-subscriber deactivation).
         std::vector<std::pair<RadioDevice*, SoapySDR::Stream*>> soapy_streams;
-        RadioDevice*                              device = nullptr; // primary (scan/trigger)
-        std::vector<std::unique_ptr<IQStreamer>>  streamers;
-        std::unique_ptr<ScanExecutor>             scan_exec;
-        std::unique_ptr<TriggerMonitor>           trig_mon;
+        RadioDevice*                             device = nullptr; // primary (scan/trigger)
+        std::vector<std::shared_ptr<IQStreamer>> streamers;
+        std::unique_ptr<ScanExecutor>            scan_exec;
+        std::unique_ptr<TriggerMonitor>          trig_mon;
     };
     mutable std::mutex                              rt_mu_;
     std::unordered_map<std::string, TaskRuntime>    runtimes_;

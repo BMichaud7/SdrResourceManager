@@ -338,3 +338,84 @@ TEST(IQStreamer, TimeoutDoesNotCountTowardErrorLimit) {
 
     EXPECT_FALSE(error_cb_called.load());
 }
+
+// ── Multi-destination (multicast) tests ──────────────────────────────────────
+
+TEST(IQStreamer, MulticastDeliversToTwoDestinations) {
+    FakeSoapy::reset();
+    FakeSoapy::samples_per_read.store(128);
+    FakeSoapy::read_delay_us.store(100);
+
+    auto [fd1, port1] = bindUdp();
+    auto [fd2, port2] = bindUdp();
+    ASSERT_GE(fd1, 0); ASSERT_GE(fd2, 0);
+
+    FakeSoapyDevice dev;
+    SoapySDR::Stream* stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, {}, {});
+
+    // Primary dest via Config
+    IQStreamer::Config cfg;
+    cfg.task_id = "task-1"; cfg.stream_id = "stream-1";
+    cfg.channel_index = 0; cfg.dest_ip = "127.0.0.1"; cfg.dest_port = port1;
+    cfg.packet_samples = 128; cfg.task_start_ms = 0; cfg.sample_rate = 10e6;
+
+    IQStreamer streamer(cfg, &dev, stream, nullptr);
+    streamer.updateCenterFreq(915e6);
+    // Add second dest before start (order doesn't matter)
+    streamer.addDest("task-2", "stream-2", "127.0.0.1", port2);
+    streamer.start();
+
+    EXPECT_EQ(streamer.destCount(), 2);
+
+    std::vector<uint8_t> buf;
+    ssize_t n1 = recvPacket(fd1, buf);
+    ssize_t n2 = recvPacket(fd2, buf);
+
+    streamer.stop();
+    ::close(fd1); ::close(fd2);
+
+    EXPECT_GE(n1, (ssize_t)IQ_PACKET_HEADER_SIZE);
+    EXPECT_GE(n2, (ssize_t)IQ_PACKET_HEADER_SIZE);
+    EXPECT_EQ(streamer.destCount(), 0); // stop clears all dests
+}
+
+TEST(IQStreamer, RemoveDestStopsDeliveryToThatClient) {
+    FakeSoapy::reset();
+    FakeSoapy::samples_per_read.store(128);
+    FakeSoapy::read_delay_us.store(100);
+
+    auto [fd1, port1] = bindUdp();
+    auto [fd2, port2] = bindUdp();
+    ASSERT_GE(fd1, 0); ASSERT_GE(fd2, 0);
+
+    FakeSoapyDevice dev;
+    SoapySDR::Stream* stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, {}, {});
+
+    IQStreamer::Config cfg;
+    cfg.task_id = "task-a"; cfg.stream_id = "s-a";
+    cfg.channel_index = 0; cfg.dest_ip = "127.0.0.1"; cfg.dest_port = port1;
+    cfg.packet_samples = 128; cfg.task_start_ms = 0; cfg.sample_rate = 10e6;
+
+    IQStreamer streamer(cfg, &dev, stream, nullptr);
+    streamer.updateCenterFreq(915e6);
+    streamer.addDest("task-b", "s-b", "127.0.0.1", port2);
+    streamer.start();
+
+    // Drain a packet on each dest to confirm both are live
+    std::vector<uint8_t> buf;
+    recvPacket(fd1, buf);
+    recvPacket(fd2, buf);
+
+    // Remove task-b
+    int remaining = streamer.removeDest("task-b");
+    EXPECT_EQ(remaining, 1);
+
+    // fd2 should now time out (no more packets)
+    struct timeval tv{0, 100'000}; // 100 ms timeout
+    ::setsockopt(fd2, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ssize_t n = recvPacket(fd2, buf);
+    EXPECT_LE(n, 0) << "task-b still receiving after removeDest";
+
+    streamer.stop();
+    ::close(fd1); ::close(fd2);
+}

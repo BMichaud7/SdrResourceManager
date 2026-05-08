@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/uio.h>
+#include <algorithm>
 
 namespace sdr {
 using namespace std::chrono;
@@ -27,42 +28,76 @@ IQStreamer::IQStreamer(const Config& cfg, SoapySDR::Device* dev,
 
 IQStreamer::~IQStreamer() { stop(); }
 
-bool IQStreamer::openUdpSocket() {
-    udp_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_fd_ < 0) return false;
+// ── Multi-destination management ─────────────────────────────────────────────
+
+void IQStreamer::addDest(const std::string& task_id, const std::string& stream_id,
+                          const std::string& ip, int port)
+{
+    Dest d;
+    d.task_id   = task_id;
+    d.stream_id = stream_id;
+    d.fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (d.fd < 0) {
+        spdlog::error("IQStreamer::addDest: socket() failed for {}:{}", ip, port);
+        return;
+    }
     int sndbuf = 8*1024*1024;
-    ::setsockopt(udp_fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    ::setsockopt(d.fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
     sockaddr_in dst{};
     dst.sin_family      = AF_INET;
-    dst.sin_port        = htons((uint16_t)cfg_.dest_port);
-    dst.sin_addr.s_addr = ::inet_addr(cfg_.dest_ip.c_str());
-    if (::connect(udp_fd_, (sockaddr*)&dst, sizeof(dst)) < 0) {
-        ::close(udp_fd_); udp_fd_=-1; return false;
+    dst.sin_port        = htons((uint16_t)port);
+    dst.sin_addr.s_addr = ::inet_addr(ip.c_str());
+    if (::connect(d.fd, (sockaddr*)&dst, sizeof(dst)) < 0) {
+        ::close(d.fd);
+        spdlog::error("IQStreamer::addDest: connect() failed for {}:{}", ip, port);
+        return;
     }
-    return true;
+    std::lock_guard lock(dests_mu_);
+    dests_.push_back(std::move(d));
+    spdlog::debug("IQStreamer [{}] +dest {} → {}:{}", cfg_.stream_id, task_id, ip, port);
 }
 
-void IQStreamer::closeUdpSocket() {
-    if (udp_fd_>=0) { ::close(udp_fd_); udp_fd_=-1; }
+int IQStreamer::removeDest(const std::string& task_id) {
+    std::lock_guard lock(dests_mu_);
+    auto it = std::find_if(dests_.begin(), dests_.end(),
+        [&](const Dest& d){ return d.task_id == task_id; });
+    if (it != dests_.end()) {
+        if (it->fd >= 0) { ::close(it->fd); it->fd = -1; }
+        dests_.erase(it);
+        spdlog::debug("IQStreamer [{}] -dest {}", cfg_.stream_id, task_id);
+    }
+    return (int)dests_.size();
 }
+
+int IQStreamer::destCount() const {
+    std::lock_guard lock(dests_mu_);
+    return (int)dests_.size();
+}
+
+// ── Lifecycle ────────────────────────────────────────────────────────────────
 
 void IQStreamer::start() {
     if (running_.exchange(true, std::memory_order_acq_rel)) return;
     current_sr_hz_.store((uint32_t)cfg_.sample_rate, std::memory_order_release);
-    if (!openUdpSocket()) {
-        running_.store(false, std::memory_order_release);
-        throw std::runtime_error("IQStreamer: UDP open failed → "+cfg_.dest_ip+":"+std::to_string(cfg_.dest_port));
-    }
+    // Auto-register the primary dest from Config (backward-compat single-dest path)
+    if (!cfg_.dest_ip.empty() && cfg_.dest_port > 0)
+        addDest(cfg_.task_id, cfg_.stream_id, cfg_.dest_ip, cfg_.dest_port);
     thread_ = std::thread(&IQStreamer::workerLoop, this);
-    spdlog::info("IQStreamer [{}] started → {}:{}", cfg_.stream_id, cfg_.dest_ip, cfg_.dest_port);
+    spdlog::info("IQStreamer [{}] started", cfg_.stream_id);
 }
 
 void IQStreamer::stop() {
     if (!running_.exchange(false, std::memory_order_acq_rel)) return;
     if (thread_.joinable()) thread_.join();
-    closeUdpSocket();
-    spdlog::info("IQStreamer [{}] stopped pkts={} oflw={}", cfg_.stream_id, metrics_.packets_sent, metrics_.overflows);
+    // Close all dest sockets
+    std::lock_guard lock(dests_mu_);
+    for (auto& d : dests_) if (d.fd >= 0) { ::close(d.fd); d.fd = -1; }
+    dests_.clear();
+    spdlog::info("IQStreamer [{}] stopped pkts={} oflw={}",
+                 cfg_.stream_id, metrics_.packets_sent, metrics_.overflows);
 }
+
+// ── Tune helpers ─────────────────────────────────────────────────────────────
 
 void IQStreamer::updateCenterFreq(double new_cf_hz) {
     current_cf_.store(new_cf_hz, std::memory_order_release);
@@ -76,6 +111,8 @@ void IQStreamer::updateSampleRate(double new_sr_sps) {
 void IQStreamer::pauseForRetune(int settle_samples) {
     drain_countdown_.store(settle_samples, std::memory_order_release);
 }
+
+// ── Packet send ──────────────────────────────────────────────────────────────
 
 void IQStreamer::sendPacket(const float* samples, uint16_t n, uint64_t ts_ns, uint8_t flags) {
     IqPacketHeader hdr{};
@@ -93,18 +130,33 @@ void IQStreamer::sendPacket(const float* samples, uint16_t n, uint64_t ts_ns, ui
     iov[0].iov_len  = sizeof(hdr);
     iov[1].iov_base = const_cast<float*>(samples);
     iov[1].iov_len  = (size_t)n * 2 * sizeof(float);
-    struct msghdr msg{};
-    msg.msg_iov = iov; msg.msg_iovlen = 2;
-    ssize_t sent = ::sendmsg(udp_fd_, &msg, MSG_DONTWAIT);
+
+    // Snapshot dest fds under lock, send outside lock
+    std::vector<int> fds;
+    {
+        std::lock_guard lock(dests_mu_);
+        fds.reserve(dests_.size());
+        for (auto& d : dests_) if (d.fd >= 0) fds.push_back(d.fd);
+    }
+
+    ssize_t last_sent = 0;
+    for (int fd : fds) {
+        struct msghdr msg{};
+        msg.msg_iov    = iov;
+        msg.msg_iovlen = 2;
+        last_sent = ::sendmsg(fd, &msg, MSG_DONTWAIT);
+    }
 
     std::lock_guard lock(mu_);
-    if (sent>0) {
+    if (last_sent > 0) {
         ++metrics_.packets_sent;
         metrics_.samples_total += n;
-        metrics_.throughput_mbps = 0.9*metrics_.throughput_mbps + 0.1*(sent*8.0/1e6);
+        metrics_.throughput_mbps = 0.9*metrics_.throughput_mbps + 0.1*(last_sent*8.0/1e6);
     }
     if (flags & IQ_FLAG_OVERFLOW) ++metrics_.overflows;
 }
+
+// ── Worker loop ──────────────────────────────────────────────────────────────
 
 void IQStreamer::workerLoop() {
     const int N = cfg_.packet_samples;
@@ -124,7 +176,8 @@ void IQStreamer::workerLoop() {
         if (ret == SOAPY_SDR_OVERFLOW) { pkt_flags|=IQ_FLAG_OVERFLOW; ++errs; }
         else if (ret<0) {
             ++errs;
-            spdlog::error("IQStreamer [{}] readStream error {} ({})", cfg_.stream_id, SoapySDR::errToStr(ret), errs);
+            spdlog::error("IQStreamer [{}] readStream error {} ({})",
+                          cfg_.stream_id, SoapySDR::errToStr(ret), errs);
             if (errs>=20) {
                 if (on_error_) on_error_(cfg_.task_id, SoapySDR::errToStr(ret));
                 break;
@@ -142,10 +195,10 @@ void IQStreamer::workerLoop() {
         if (dwell_changed_.exchange(false, std::memory_order_acq_rel)) pkt_flags|=IQ_FLAG_DWELL_CHANGE;
 
         uint64_t ts_ns = (uint64_t)duration_cast<nanoseconds>(steady_clock::now()-t0).count();
-        uint16_t n = ret>0 ? (uint16_t)std::min(ret,N) : 0u;
-        if (n>0||pkt_flags) sendPacket(buf.data(), n, ts_ns, pkt_flags);
+        uint16_t nsamples = ret>0 ? (uint16_t)std::min(ret,N) : 0u;
+        if (nsamples>0||pkt_flags) sendPacket(buf.data(), nsamples, ts_ns, pkt_flags);
 
-        if (n>=64) {
+        if (nsamples>=64) {
             float rms_sq=0;
             for (int i=0;i<64*2;++i) rms_sq+=buf[static_cast<size_t>(i)]*buf[static_cast<size_t>(i)];
             float rdbfs = 10.f*std::log10(rms_sq/64.f+1e-30f);

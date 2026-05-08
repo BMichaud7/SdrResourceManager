@@ -759,13 +759,43 @@ ResourceManager::tryRetuneCombined(const TaskRequest& req,
         if (req.rf.bandwidth_hz > caps.bandwidth_max_hz) continue;
         if (req.rf.rx_count     > caps.rx_channels)     continue;
 
+        // Skip when the new CF matches the existing device window: canFit already
+        // attempted slice packing at the current CF and failed for other reasons
+        // (e.g. channel count). Only expand the window when CFs genuinely differ.
+        {
+            auto slots_cf = tl->slotsOverlapping(t_start, t_stop);
+            bool same_cf = !slots_cf.empty() &&
+                std::all_of(slots_cf.begin(), slots_cf.end(),
+                    [&](const TimeFreqSlot& s){
+                        return std::abs(s.center_freq_hz - req.rf.center_freq_hz) < 1.0;
+                    });
+            if (same_cf) continue;
+        }
+
         auto cr = tl->canCombine(t_start, t_stop,
                                   req.rf.center_freq_hz, req.rf.bandwidth_hz,
                                   req.rf.rx_count, caps.rx_channels,
-                                  guard, caps.sample_rate_max_sps);
+                                  guard, caps.sample_rate_max_sps,
+                                  true /* reuse_channels — multicast from existing channel */);
         if (!cr.ok) {
             spdlog::debug("tryRetuneCombined: {} not combinable: {}", dev_id, cr.reject_reason);
             continue;
+        }
+
+        // Rank guard: don't let a lower-rank task subscribe to a higher-rank stream
+        {
+            auto slots_chk = tl->slotsOverlapping(t_start, t_stop);
+            bool rank_ok = true;
+            std::lock_guard lock(reg_mu_);
+            for (auto& slot : slots_chk) {
+                auto it = registry_.find(slot.task_id);
+                if (it == registry_.end()) continue;
+                if (!isTerminalState(it->second.state) && req.rank < it->second.rank) {
+                    rank_ok = false;
+                    break;
+                }
+            }
+            if (!rank_ok) continue;
         }
 
         // Retune device hardware to the combined window
@@ -913,39 +943,75 @@ void ResourceManager::activateTask(const std::string& task_id) {
         const bool shared_lo = dev->config().shared_lo;
 
         if (shared_lo) {
-            // One LO, one SoapySDR stream, all channels read from it together.
-            if (!dev->tune(alloc.center_freq_hz, alloc.sample_rate_sps)) {
-                deactivateTask(task_id, TaskState::FAILED,
-                               "Tune failed on " + alloc.device_id); return;
+            // Check whether all requested channels are already live (combined-window
+            // multicast). If so, subscribe to the existing IQStreamer(s) instead of
+            // opening new hardware.
+            std::vector<std::shared_ptr<IQStreamer>> borrowed;
+            std::vector<std::pair<RadioDevice*, SoapySDR::Stream*>> borrowed_hw;
+            {
+                std::lock_guard lk(rt_mu_);
+                for (int ch : alloc.rx_channels) {
+                    std::string key = alloc.device_id + ":" + std::to_string(ch);
+                    auto it = channel_states_.find(key);
+                    if (it != channel_states_.end()) {
+                        borrowed.push_back(it->second.streamer);
+                        borrowed_hw.push_back({it->second.device, it->second.soapy_stream});
+                    }
+                }
             }
-            for (int ch : alloc.rx_channels) dev->setRxGain(ch, 30.0, false);
 
-            SoapySDR::Stream* s = dev->openRxStream(alloc.rx_channels);
-            if (!s) {
-                deactivateTask(task_id, TaskState::FAILED,
-                               "openRxStream failed on " + alloc.device_id); return;
-            }
-            if (!dev->activateStream(s)) {
-                dev->closeStream(s);
-                deactivateTask(task_id, TaskState::FAILED,
-                               "activateStream failed on " + alloc.device_id); return;
-            }
-            rt.soapy_streams.push_back({dev, s});
+            if (borrowed.size() == alloc.rx_channels.size()) {
+                // All channels shared — subscribe to live streamers (no hardware open)
+                for (int i = 0; i < (int)alloc.rx_channels.size(); ++i) {
+                    borrowed[i]->addDest(
+                        task_id,
+                        makeStreamId(task_id, "RX", alloc.device_id, alloc.rx_channels[i]),
+                        streaming.dest_ip,
+                        alloc.udp_ports[static_cast<size_t>(i)]);
+                    rt.streamers.push_back(borrowed[i]);
+                    rt.soapy_streams.push_back(borrowed_hw[i]); // ref for trigger monitor
+                }
+                spdlog::info("activateTask [{}] subscribed to shared channel(s) on {}",
+                             task_id, alloc.device_id);
+            } else {
+                // New channel(s) — tune device, open stream, create IQStreamer(s)
+                if (!dev->tune(alloc.center_freq_hz, alloc.sample_rate_sps)) {
+                    deactivateTask(task_id, TaskState::FAILED,
+                                   "Tune failed on " + alloc.device_id); return;
+                }
+                for (int ch : alloc.rx_channels) dev->setRxGain(ch, 30.0, false);
 
-            for (int i=0; i<(int)alloc.rx_channels.size(); ++i) {
-                IQStreamer::Config sc;
-                sc.task_id       = task_id;
-                sc.stream_id     = makeStreamId(task_id,"RX",alloc.device_id,alloc.rx_channels[i]);
-                sc.channel_index = alloc.rx_channels[i];
-                sc.dest_ip       = streaming.dest_ip;
-                sc.dest_port     = alloc.udp_ports[static_cast<size_t>(i)];
-                sc.packet_samples= cfg_.policy.iq_packet_samples;
-                sc.task_start_ms = rec.start_time_ms;
-                sc.sample_rate   = alloc.sample_rate_sps;
-                auto streamer = std::make_unique<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
-                streamer->updateCenterFreq(alloc.center_freq_hz);
-                streamer->start();
-                rt.streamers.push_back(std::move(streamer));
+                SoapySDR::Stream* s = dev->openRxStream(alloc.rx_channels);
+                if (!s) {
+                    deactivateTask(task_id, TaskState::FAILED,
+                                   "openRxStream failed on " + alloc.device_id); return;
+                }
+                if (!dev->activateStream(s)) {
+                    dev->closeStream(s);
+                    deactivateTask(task_id, TaskState::FAILED,
+                                   "activateStream failed on " + alloc.device_id); return;
+                }
+                rt.soapy_streams.push_back({dev, s});
+
+                for (int i=0; i<(int)alloc.rx_channels.size(); ++i) {
+                    IQStreamer::Config sc;
+                    sc.task_id       = task_id;
+                    sc.stream_id     = makeStreamId(task_id,"RX",alloc.device_id,alloc.rx_channels[i]);
+                    sc.channel_index = alloc.rx_channels[i];
+                    sc.dest_ip       = streaming.dest_ip;
+                    sc.dest_port     = alloc.udp_ports[static_cast<size_t>(i)];
+                    sc.packet_samples= cfg_.policy.iq_packet_samples;
+                    sc.task_start_ms = rec.start_time_ms;
+                    sc.sample_rate   = alloc.sample_rate_sps;
+                    auto streamer = std::make_shared<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
+                    streamer->updateCenterFreq(alloc.center_freq_hz);
+                    streamer->start();
+                    rt.streamers.push_back(streamer);
+
+                    std::string key = alloc.device_id + ":" + std::to_string(alloc.rx_channels[i]);
+                    std::lock_guard lk(rt_mu_);
+                    channel_states_[key] = {dev, s, streamer};
+                }
             }
         } else {
             // Each channel has its own LO and its own SoapySDR stream.
@@ -978,10 +1044,10 @@ void ResourceManager::activateTask(const std::string& task_id) {
                 sc.packet_samples= cfg_.policy.iq_packet_samples;
                 sc.task_start_ms = rec.start_time_ms;
                 sc.sample_rate   = alloc.sample_rate_sps;
-                auto streamer = std::make_unique<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
+                auto streamer = std::make_shared<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
                 streamer->updateCenterFreq(alloc.center_freq_hz);
                 streamer->start();
-                rt.streamers.push_back(std::move(streamer));
+                rt.streamers.push_back(streamer);
             }
         }
     }
@@ -1057,9 +1123,32 @@ void ResourceManager::deactivateTask(const std::string& task_id,
             auto& rt = it->second;
             if (rt.scan_exec) rt.scan_exec->stop();
             if (rt.trig_mon)  rt.trig_mon->stop();
-            for (auto& s : rt.streamers) s->stop();
+
+            // Remove this task's UDP dest from each shared streamer.
+            // Stop the streamer and close the SoapySDR stream only when
+            // the last subscriber's dest is removed.
+            for (auto& streamer : rt.streamers)
+                streamer->removeDest(task_id);
+
             for (auto& [d, s] : rt.soapy_streams) {
-                if (d && s) { d->deactivateStream(s); d->closeStream(s); }
+                bool should_close = false;
+                for (auto cs = channel_states_.begin(); cs != channel_states_.end(); ) {
+                    if (cs->second.soapy_stream == s) {
+                        if (cs->second.streamer->destCount() == 0) {
+                            cs->second.streamer->stop();
+                            should_close = true;
+                            cs = channel_states_.erase(cs);
+                        } else {
+                            ++cs;
+                        }
+                    } else {
+                        ++cs;
+                    }
+                }
+                if (should_close && d && s) {
+                    d->deactivateStream(s);
+                    d->closeStream(s);
+                }
             }
             runtimes_.erase(it);
         }

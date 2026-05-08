@@ -176,7 +176,8 @@ SpectrumTimeline::CombineResult
 SpectrumTimeline::canCombine(int64_t t_start, int64_t t_stop,
                               double cf_hz, double bw_hz,
                               int rx_count, int max_rx,
-                              double guard_hz, double sr_max) const
+                              double guard_hz, double sr_max,
+                              bool reuse_channels) const
 {
     std::lock_guard lock(mu_);
     CombineResult res;
@@ -205,6 +206,31 @@ SpectrumTimeline::canCombine(int64_t t_start, int64_t t_stop,
     if (combined_sr > sr_max) {
         res.reject_reason = "Combined SR " + std::to_string((long long)(combined_sr / 1e6))
                           + " MSPS exceeds device max " + std::to_string((long long)(sr_max / 1e6)) + " MSPS";
+        return res;
+    }
+
+    if (reuse_channels) {
+        // Return the existing channels so the caller can subscribe to the live
+        // IQStreamer rather than opening new hardware.
+        std::vector<int> existing;
+        for (auto* s : over) {
+            for (int c : s->rx_channels) {
+                if (std::find(existing.begin(), existing.end(), c) == existing.end())
+                    existing.push_back(c);
+                if ((int)existing.size() == rx_count) break;
+            }
+            if ((int)existing.size() == rx_count) break;
+        }
+        if (existing.empty()) {
+            res.reject_reason = "No existing channels to share";
+            return res;
+        }
+        res.ok           = true;
+        res.combined_cf  = combined_cf;
+        res.combined_sr  = combined_sr;
+        res.new_slice_lo = req_lo;
+        res.new_slice_hi = req_hi;
+        res.avail_rx     = existing;
         return res;
     }
 

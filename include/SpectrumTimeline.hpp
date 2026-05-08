@@ -61,10 +61,14 @@ public:
         std::vector<int> avail_rx;
         std::string      reject_reason;
     };
+    // reuse_channels=false (default): pick the next free RX channels.
+    // reuse_channels=true:  ignore channel limits; return existing channels for
+    //                       sharing (used by the single-channel multicast path).
     CombineResult canCombine(int64_t t_start, int64_t t_stop,
                               double cf_hz, double bw_hz,
                               int rx_count, int max_rx,
-                              double guard_hz, double sr_max) const;
+                              double guard_hz, double sr_max,
+                              bool reuse_channels = false) const;
 
     // Update center_freq_hz and sample_rate_sps for all existing slots.
     // Called after the device is physically retuned to a combined window.
