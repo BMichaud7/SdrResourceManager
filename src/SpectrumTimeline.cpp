@@ -172,6 +172,77 @@ FitResult SpectrumTimeline::canFit(
     return res;
 }
 
+SpectrumTimeline::CombineResult
+SpectrumTimeline::canCombine(int64_t t_start, int64_t t_stop,
+                              double cf_hz, double bw_hz,
+                              int rx_count, int max_rx,
+                              double guard_hz, double sr_max) const
+{
+    std::lock_guard lock(mu_);
+    CombineResult res;
+
+    std::vector<const TimeFreqSlot*> over;
+    for (auto& s : slots_)
+        if (timeOverlap(t_start, t_stop, s.t_start, s.t_stop))
+            over.push_back(&s);
+
+    if (over.empty()) {
+        res.reject_reason = "No existing tasks to combine with";
+        return res;
+    }
+
+    double req_lo = cf_hz - bw_hz / 2.0;
+    double req_hi = cf_hz + bw_hz / 2.0;
+    double min_lo = req_lo, max_hi = req_hi;
+    for (auto* s : over) {
+        min_lo = std::min(min_lo, s->slice_lo_hz);
+        max_hi = std::max(max_hi, s->slice_hi_hz);
+    }
+
+    double combined_sr = (max_hi - min_lo) + 2.0 * guard_hz;
+    double combined_cf = (min_lo + max_hi) / 2.0;
+
+    if (combined_sr > sr_max) {
+        res.reject_reason = "Combined SR " + std::to_string((long long)(combined_sr / 1e6))
+                          + " MSPS exceeds device max " + std::to_string((long long)(sr_max / 1e6)) + " MSPS";
+        return res;
+    }
+
+    int used_rx = 0;
+    std::vector<bool> rx_used(static_cast<size_t>(max_rx), false);
+    for (auto* s : over) {
+        used_rx += (int)s->rx_channels.size();
+        for (int c : s->rx_channels) if (c < max_rx) rx_used[static_cast<size_t>(c)] = true;
+    }
+    if (used_rx + rx_count > max_rx) {
+        res.reject_reason = "RX " + std::to_string(used_rx) + "+" + std::to_string(rx_count)
+                          + ">" + std::to_string(max_rx);
+        return res;
+    }
+
+    std::vector<int> arx;
+    for (int i = 0; i < max_rx && (int)arx.size() < rx_count; ++i)
+        if (!rx_used[static_cast<size_t>(i)]) arx.push_back(i);
+
+    res.ok           = true;
+    res.combined_cf  = combined_cf;
+    res.combined_sr  = combined_sr;
+    res.new_slice_lo = req_lo;
+    res.new_slice_hi = req_hi;
+    res.avail_rx     = arx;
+    return res;
+}
+
+void SpectrumTimeline::updateDeviceTune(double new_cf, double new_sr) {
+    std::lock_guard lock(mu_);
+    for (auto& s : slots_) {
+        s.center_freq_hz  = new_cf;
+        s.sample_rate_sps = new_sr;
+    }
+    spdlog::debug("Timeline: updateDeviceTune cf={:.3f}MHz sr={:.3f}MSPS",
+                  new_cf / 1e6, new_sr / 1e6);
+}
+
 void SpectrumTimeline::insert(const TimeFreqSlot& s) {
     std::lock_guard lock(mu_);
     slots_.push_back(s);

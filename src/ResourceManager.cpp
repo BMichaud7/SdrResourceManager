@@ -355,6 +355,10 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
             req.rf.rx_count, req.rf.tx_count, t_start, t_stop, req.rf.preferred_device);
     }
 
+    // Try expanding an existing shared-LO window to fit both tasks
+    if (!candidate)
+        candidate = tryRetuneCombined(req, t_start, t_stop);
+
     if (!candidate) {
         resp.reject_code   = RejectCode::NO_DEVICE_AVAILABLE;
         resp.reject_reason = "No device satisfies constraints";
@@ -729,6 +733,99 @@ bool ResourceManager::tryPreemptConflicting(const TaskRequest& req,
         }
     }
     return false;
+}
+
+// ── Combined-window retune ───────────────────────────────────────────────
+// When a new task at a different CF can't fit the current device window,
+// try to expand the window to cover both the existing and new slices.
+// The device is physically retuned, all running streamers are paused for
+// PLL settle, and existing timeline slots are updated to the new CF/SR.
+std::optional<ResourceManager::DeviceCandidate>
+ResourceManager::tryRetuneCombined(const TaskRequest& req,
+                                    int64_t t_start, int64_t t_stop)
+{
+    const double guard  = cfg_.policy.guard_band_hz;
+    // Settle window: drain 2 packets' worth of samples after retune
+    const int    settle = cfg_.policy.iq_packet_samples * 2;
+
+    for (auto& [dev_id, tl] : timelines_) {
+        auto& dev = devices_.at(dev_id);
+        if (!dev->isOnline()) continue;
+        if (!dev->config().shared_lo) continue;
+
+        const auto& caps = dev->config().caps;
+        if (req.rf.center_freq_hz < caps.freq_min_hz ||
+            req.rf.center_freq_hz > caps.freq_max_hz) continue;
+        if (req.rf.bandwidth_hz > caps.bandwidth_max_hz) continue;
+        if (req.rf.rx_count     > caps.rx_channels)     continue;
+
+        auto cr = tl->canCombine(t_start, t_stop,
+                                  req.rf.center_freq_hz, req.rf.bandwidth_hz,
+                                  req.rf.rx_count, caps.rx_channels,
+                                  guard, caps.sample_rate_max_sps);
+        if (!cr.ok) {
+            spdlog::debug("tryRetuneCombined: {} not combinable: {}", dev_id, cr.reject_reason);
+            continue;
+        }
+
+        // Retune device hardware to the combined window
+        if (!dev->tune(cr.combined_cf, cr.combined_sr)) {
+            spdlog::warn("tryRetuneCombined: tune failed on {}", dev_id);
+            continue;
+        }
+
+        // Update timeline slots to reflect new device CF/SR
+        tl->updateDeviceTune(cr.combined_cf, cr.combined_sr);
+
+        // Pause all running streamers on this device for PLL settle,
+        // then push the new CF/SR into the packet headers
+        auto slots = tl->slotsOverlapping(t_start, t_stop);
+        {
+            std::lock_guard lock(rt_mu_);
+            for (auto& slot : slots) {
+                auto it = runtimes_.find(slot.task_id);
+                if (it == runtimes_.end()) continue;
+                for (auto& streamer : it->second.streamers) {
+                    streamer->pauseForRetune(settle);
+                    streamer->updateCenterFreq(cr.combined_cf);
+                    streamer->updateSampleRate(cr.combined_sr);
+                }
+            }
+        }
+
+        // Update registry allocations and notify affected tasks
+        std::vector<std::string> to_notify;
+        {
+            std::lock_guard lock(reg_mu_);
+            for (auto& slot : slots) {
+                auto it = registry_.find(slot.task_id);
+                if (it == registry_.end()) continue;
+                for (auto& alloc : it->second.allocations) {
+                    if (alloc.device_id == dev_id) {
+                        alloc.center_freq_hz  = cr.combined_cf;
+                        alloc.sample_rate_sps = cr.combined_sr;
+                    }
+                }
+                to_notify.push_back(slot.task_id);
+            }
+        }
+        for (auto& tid : to_notify)
+            notifyStateChange(tid);
+
+        spdlog::info("ResourceManager: combined retune on {} → cf={:.3f}MHz sr={:.3f}MSPS "
+                     "(covering {} existing task(s))",
+                     dev_id, cr.combined_cf / 1e6, cr.combined_sr / 1e6, (int)slots.size());
+
+        FitResult fit;
+        fit.ok          = true;
+        fit.device_cf   = cr.combined_cf;
+        fit.device_rate = cr.combined_sr;
+        fit.placed_lo   = cr.new_slice_lo;
+        fit.placed_hi   = cr.new_slice_hi;
+        fit.avail_rx    = cr.avail_rx;
+        return DeviceCandidate{dev.get(), std::move(fit)};
+    }
+    return std::nullopt;
 }
 
 // ── Stop / Cancel ────────────────────────────────────────────────────────

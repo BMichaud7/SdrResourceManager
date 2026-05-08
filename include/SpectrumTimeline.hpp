@@ -49,6 +49,27 @@ public:
                      double guard_hz,
                      bool shared_lo = true) const;
 
+    // Returns a combined RF window if a new slice at cf_hz/bw_hz can be
+    // accommodated by expanding the shared device window to cover both the
+    // existing slices and the new request.  Does NOT mutate the timeline.
+    struct CombineResult {
+        bool             ok           = false;
+        double           combined_cf  = 0;
+        double           combined_sr  = 0;
+        double           new_slice_lo = 0;
+        double           new_slice_hi = 0;
+        std::vector<int> avail_rx;
+        std::string      reject_reason;
+    };
+    CombineResult canCombine(int64_t t_start, int64_t t_stop,
+                              double cf_hz, double bw_hz,
+                              int rx_count, int max_rx,
+                              double guard_hz, double sr_max) const;
+
+    // Update center_freq_hz and sample_rate_sps for all existing slots.
+    // Called after the device is physically retuned to a combined window.
+    void updateDeviceTune(double new_cf, double new_sr);
+
     void insert(const TimeFreqSlot& s);
     void remove(const std::string& task_id);
 

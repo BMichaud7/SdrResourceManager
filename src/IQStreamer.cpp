@@ -48,6 +48,7 @@ void IQStreamer::closeUdpSocket() {
 
 void IQStreamer::start() {
     if (running_.exchange(true, std::memory_order_acq_rel)) return;
+    current_sr_hz_.store((uint32_t)cfg_.sample_rate, std::memory_order_release);
     if (!openUdpSocket()) {
         running_.store(false, std::memory_order_release);
         throw std::runtime_error("IQStreamer: UDP open failed → "+cfg_.dest_ip+":"+std::to_string(cfg_.dest_port));
@@ -68,13 +69,21 @@ void IQStreamer::updateCenterFreq(double new_cf_hz) {
     dwell_changed_.store(true, std::memory_order_release);
 }
 
+void IQStreamer::updateSampleRate(double new_sr_sps) {
+    current_sr_hz_.store((uint32_t)new_sr_sps, std::memory_order_release);
+}
+
+void IQStreamer::pauseForRetune(int settle_samples) {
+    drain_countdown_.store(settle_samples, std::memory_order_release);
+}
+
 void IQStreamer::sendPacket(const float* samples, uint16_t n, uint64_t ts_ns, uint8_t flags) {
     IqPacketHeader hdr{};
     hdr.magic          = IQ_PACKET_MAGIC;
     hdr.sequence       = seq_++;
     hdr.timestamp_ns   = ts_ns;
     hdr.center_freq_hz = (uint64_t)current_cf_.load(std::memory_order_relaxed);
-    hdr.sample_rate    = (uint32_t)cfg_.sample_rate;
+    hdr.sample_rate    = current_sr_hz_.load(std::memory_order_relaxed);
     hdr.num_samples    = n;
     hdr.channel_index  = (uint8_t)cfg_.channel_index;
     hdr.flags          = flags;
@@ -122,6 +131,12 @@ void IQStreamer::workerLoop() {
             }
             continue;
         } else { errs=0; }
+
+        // Drain settle samples after a retune — read hardware but discard UDP send
+        if (int rem = drain_countdown_.load(std::memory_order_acquire); rem > 0) {
+            drain_countdown_.fetch_sub(1, std::memory_order_release);
+            continue;
+        }
 
         if (first) { pkt_flags|=IQ_FLAG_FIRST_PACKET; first=false; }
         if (dwell_changed_.exchange(false, std::memory_order_acq_rel)) pkt_flags|=IQ_FLAG_DWELL_CHANGE;

@@ -1115,3 +1115,74 @@ TEST(ResourceManager, Rank_TaskRecordCarriesRankFromRequest) {
 
     rm.stopTask(resp.task_id, "s1", "done");
 }
+
+// ── Combined-window / slice-packing tests ────────────────────────────────────
+
+TEST(ResourceManager, CombinedWindow_SecondTaskAtNearbyFreqAccepted) {
+    // Task 1: 100 MHz / 100 kHz BW / 1 MHz SR (slice+2*guard=500 kHz fits in 1 MHz window).
+    // Task 2: 101 MHz / 100 kHz BW — different CF than device, triggers combined retune.
+    // Combined window: cf=100.5 MHz, sr≈1.5 MHz covers both slices.
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto r1 = rm.tryAccept(makeContinuous("req-1", 100e6, 100e3, 1e6, 1));
+    ASSERT_TRUE(r1.accepted) << r1.reject_reason;
+    ASSERT_EQ(r1.streams.size(), 1u);
+
+    auto r2 = rm.tryAccept(makeContinuous("req-2", 101e6, 100e3, 1e6, 1));
+    ASSERT_TRUE(r2.accepted) << r2.reject_reason;
+    ASSERT_EQ(r2.streams.size(), 1u);
+
+    // Both streams on same device, different channels
+    EXPECT_EQ(r1.streams[0].device_id, r2.streams[0].device_id);
+    EXPECT_NE(r1.streams[0].channel_index, r2.streams[0].channel_index);
+
+    // Task 2's slice center is offset from the combined device CF
+    EXPECT_NE(r2.streams[0].slice_offset_hz, 0.0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    rm.stopTask(r1.task_id, "s1", "done");
+    rm.stopTask(r2.task_id, "s2", "done");
+    EXPECT_EQ(rm.udpPortsUsed(), 0);
+}
+
+TEST(ResourceManager, CombinedWindow_NotAttemptedWhenSpanExceedsDeviceMax) {
+    // Task 1 at 100 MHz, Task 2 at 200 MHz — 100 MHz apart, beyond device SR max (61.44 MHz).
+    // Second task must be rejected with NO_DEVICE_AVAILABLE.
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto r1 = rm.tryAccept(makeContinuous("req-1", 100e6, 100e3, 1e6, 1));
+    ASSERT_TRUE(r1.accepted) << r1.reject_reason;
+
+    auto r2 = rm.tryAccept(makeContinuous("req-2", 200e6, 100e3, 1e6, 1));
+    EXPECT_FALSE(r2.accepted);
+    EXPECT_EQ(r2.reject_code, RejectCode::NO_DEVICE_AVAILABLE);
+
+    rm.stopTask(r1.task_id, "s1", "done");
+}
+
+TEST(ResourceManager, CombinedWindow_ThirdTaskRejectedWhenNoRxChannelsFree) {
+    // Task 1 and 2 use both RX channels via combine.
+    // Task 3 must be rejected even though the combined window could extend further.
+    FakeSoapy::reset();
+    AppConfig cfg = makeTestConfig();
+    cfg.devices[0].caps.rx_channels = 2; // exactly 2 channels
+    ResourceManager rm(cfg, [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto r1 = rm.tryAccept(makeContinuous("req-1", 100e6, 100e3, 1e6, 1));
+    ASSERT_TRUE(r1.accepted);
+    auto r2 = rm.tryAccept(makeContinuous("req-2", 101e6, 100e3, 1e6, 1));
+    ASSERT_TRUE(r2.accepted);
+
+    // Both channels now occupied
+    auto r3 = rm.tryAccept(makeContinuous("req-3", 102e6, 100e3, 1e6, 1));
+    EXPECT_FALSE(r3.accepted);
+    EXPECT_EQ(r3.reject_code, RejectCode::NO_DEVICE_AVAILABLE);
+
+    rm.stopTask(r1.task_id, "s1", "done");
+    rm.stopTask(r2.task_id, "s2", "done");
+}

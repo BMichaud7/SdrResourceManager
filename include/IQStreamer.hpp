@@ -36,6 +36,13 @@ public:
     bool isRunning() const { return running_.load(std::memory_order_acquire); }
 
     void updateCenterFreq(double new_cf_hz);
+    void updateSampleRate(double new_sr_sps);
+
+    // Drain `settle_samples` reads from the hardware without sending UDP packets.
+    // Called before a device retune so the PLL-settling garbage is silently
+    // discarded rather than streamed to the DSP client.
+    void pauseForRetune(int settle_samples);
+
     StreamMetrics getMetrics() const;
 
 private:
@@ -44,11 +51,13 @@ private:
     SoapySDR::Stream* stream_;
     TaskErrorCb       on_error_;
 
-    std::atomic<bool>   running_       {false};
-    std::atomic<double> current_cf_    {0.0};
-    std::atomic<bool>   dwell_changed_ {false};
-    std::thread         thread_;
-    int                 udp_fd_        = -1;
+    std::atomic<bool>     running_         {false};
+    std::atomic<double>   current_cf_      {0.0};
+    std::atomic<bool>     dwell_changed_   {false};
+    std::atomic<int>      drain_countdown_ {0};
+    std::atomic<uint32_t> current_sr_hz_   {0};
+    std::thread           thread_;
+    int                   udp_fd_          = -1;
 
     mutable std::mutex mu_;
     StreamMetrics      metrics_;

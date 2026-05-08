@@ -277,6 +277,65 @@ TEST(SpectrumTimeline, GuardBandPreventsImmediatelyAdjacentSlice) {
     }
 }
 
+// ── canCombine tests ──────────────────────────────────────────────────────────
+
+TEST(SpectrumTimeline, CanCombineReturnsFalseOnEmptyTimeline) {
+    SpectrumTimeline tl;
+    auto cr = tl.canCombine(0, 60'000, CF, 100e3, 1, MRX, G, SR);
+    EXPECT_FALSE(cr.ok);
+}
+
+TEST(SpectrumTimeline, CanCombineTwoNearbySlicesFitsWithinMaxSr) {
+    SpectrumTimeline tl;
+    // Task 1 at 100 MHz, BW 100 kHz
+    tl.insert(makeSlot("t1", 0, 60'000, 100e6, SR, 99.95e6, 100.05e6, {0}));
+
+    // Task 2 requests 101 MHz, BW 100 kHz. Combined span = 1.1 MHz + 2*guard
+    auto cr = tl.canCombine(0, 60'000, 101e6, 100e3, 1, MRX, G, SR);
+    ASSERT_TRUE(cr.ok);
+    EXPECT_NEAR(cr.combined_cf, 100.5e6, 1.0);
+    // combined_sr = (101.05M - 99.95M) + 2*200k = 1.5 MHz
+    EXPECT_NEAR(cr.combined_sr, 1.5e6, 1.0);
+    EXPECT_NEAR(cr.new_slice_lo, 100.95e6, 1.0);
+    EXPECT_NEAR(cr.new_slice_hi, 101.05e6, 1.0);
+    ASSERT_FALSE(cr.avail_rx.empty());
+    EXPECT_EQ(cr.avail_rx[0], 1); // ch 0 already used by t1
+}
+
+TEST(SpectrumTimeline, CanCombineRejectsWhenCombinedSrExceedsMax) {
+    SpectrumTimeline tl;
+    // Existing task at 100 MHz. New request at 110 MHz, BW 5 MHz.
+    // Combined span = (115M - 95M) = 20 MHz + guard → exceeds sr_max=10 MHz
+    tl.insert(makeSlot("t1", 0, 60'000, 100e6, SR, 95e6, 105e6, {0}));
+
+    auto cr = tl.canCombine(0, 60'000, 110e6, 5e6, 1, MRX, G, SR); // sr_max=10e6
+    EXPECT_FALSE(cr.ok);
+}
+
+TEST(SpectrumTimeline, CanCombineRejectsWhenNoRxChannelsFree) {
+    SpectrumTimeline tl;
+    // Both RX channels already in use
+    tl.insert(makeSlot("t1", 0, 60'000, 100e6, SR, 99.95e6, 100.05e6, {0, 1}));
+
+    auto cr = tl.canCombine(0, 60'000, 101e6, 100e3, 1, MRX, G, SR);
+    EXPECT_FALSE(cr.ok);
+}
+
+TEST(SpectrumTimeline, UpdateDeviceTuneUpdatesAllSlots) {
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("t1", 0, 60'000, 100e6, SR, 99.95e6, 100.05e6, {0}));
+    tl.insert(makeSlot("t2", 0, 60'000, 100e6, SR, 100.95e6, 101.05e6, {1}));
+
+    tl.updateDeviceTune(100.5e6, 1.5e6);
+
+    auto slots = tl.slotsOverlapping(0, 60'000);
+    ASSERT_EQ(slots.size(), 2u);
+    for (auto& s : slots) {
+        EXPECT_DOUBLE_EQ(s.center_freq_hz,  100.5e6);
+        EXPECT_DOUBLE_EQ(s.sample_rate_sps,   1.5e6);
+    }
+}
+
 // ── allocatedBw edge cases ────────────────────────────────────────────────────
 
 TEST(SpectrumTimeline, AllocatedBwIsZeroWhenNoActiveSlots) {
