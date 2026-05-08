@@ -1,6 +1,6 @@
 # INTERFACE CONTROL DOCUMENT (ICD)
 ## SDR Radio Resource Task Manager
-### Document: SDR-RRTM-ICD-002  |  Version: 2.2  |  Status: Released
+### Document: SDR-RRTM-ICD-002  |  Version: 2.3  |  Status: Released
 
 ---
 
@@ -19,8 +19,9 @@ The controller supports any SoapySDR-compatible hardware. Device capabilities ar
 declared per-board in `devices.xml`. Two coherence modes are supported:
 
 **`shared_lo=true`** (e.g. AD9361, LimeSDR MIMO): all RX channels on a board share
-one LO and one RF window. All tasks on the same device during overlapping windows
-MUST share `center_frequency` and `sample_rate`.
+one LO and one RF window. The controller packs multiple tasks' slices within a single
+shared window. When a new task requests a center frequency that differs from the active
+window, the controller attempts a **combined-window retune** (see §4.3) before rejecting.
 
 **`shared_lo=false`** (e.g. RTL-SDR, HackRF, USRP B210): each channel tunes
 independently; concurrent tasks may use different center frequencies on the same board.
@@ -118,6 +119,55 @@ Preempted tasks receive a `TASK_STATUS` event (see §8.8) with:
   "terminal_reason": "PREEMPTED_BY_HIGHER_RANK rank=3 request=550e8400-..."
 }
 ```
+
+### 4.3 Combined-window slice packing and single-channel multicast
+
+When a `shared_lo=true` device is already streaming at CF_A and a new task arrives at
+CF_B ≠ CF_A, the controller does not immediately reject with `RETUNE_CONFLICT`. Instead
+it attempts to compute a **combined RF window** that covers both slices:
+
+```
+combined_cf  = (min_slice_lo + max_slice_hi) / 2
+combined_sr  = (max_slice_hi - min_slice_lo) + 2 × guard_band_hz
+```
+
+If `combined_sr ≤ device.sample_rate_max_sps` and the new task's `rank ≥` all
+existing tasks on the device, the controller:
+
+1. Retuning the device to `combined_cf` / `combined_sr` via SoapySDR
+2. Draining `2 × iq_packet_samples` hardware reads from the existing stream (PLL settle)
+3. Updating the existing task's packet headers to the new CF and SR — clients that
+   observe a packet with `IQ_FLAG_DWELL_CHANGE` set should update their frequency
+   context and re-read `center_freq_hz` from the header
+4. Sending a `TASK_STATUS` event for the existing task so its updated `center_freq_hz`
+   and `sample_rate_sps` are reflected in the allocation record
+5. Accepting the new task — both tasks share the **same physical channel** and the same
+   SoapySDR stream. The single IQStreamer multicasts identical wideband IQ packets to
+   both tasks' UDP endpoints
+
+Each task receives the full combined-window IQ stream. The `slice_offset_hz` field in
+the `TASK_RESPONSE` and `TASK_STATUS` streams tells each DSP client where within the
+wideband capture its slice is:
+
+```
+slice_offset_hz = slice_center_hz - device_cf
+```
+
+A DSP client should digitally mix by `-slice_offset_hz` and low-pass filter to
+`slice_bw_hz` to recover its assigned sub-band.
+
+**Example** — Task A at 100.0 MHz / 100 kHz BW, then Task B arrives at 101.0 MHz / 100 kHz BW:
+
+| | Before combine | After combine |
+|---|---|---|
+| Device CF | 100.0 MHz | 100.5 MHz |
+| Device SR | 1.0 MHz | 1.5 MHz |
+| Task A `slice_offset_hz` | 0 Hz | −500 kHz |
+| Task B `slice_offset_hz` | — | +500 kHz |
+
+If `combined_sr` would exceed `sample_rate_max_sps`, or the new task's rank is lower
+than any existing task on that device, the request is rejected with
+`reject_code = NO_DEVICE_AVAILABLE`.
 
 ---
 
@@ -545,8 +595,13 @@ Response arrives as `HEALTH_QUERY_RESPONSE` on the response queue.
 ```
 
 `actual_stop_epoch_ms` is `0` for CONTINUOUS tasks (no end time).
-`slice_offset_hz` is non-zero when the task occupies a sub-band within the device's
-RF window (e.g., two tasks sharing the same LO).
+
+`slice_offset_hz` is the offset of this task's slice center from the device LO
+(`slice_center - device_cf`). It is non-zero when the task occupies a sub-band
+within the device's RF window. It **can change mid-stream** if a combined-window
+retune expands the device RF window to accommodate a new co-channel task — the
+updated value is delivered via a `TASK_STATUS` event (§8.13). Clients should
+monitor `TASK_STATUS` and re-tune their DSP chains when this field changes.
 
 ### 8.12 TASK_RESPONSE — REJECTED
 
@@ -576,7 +631,7 @@ RF window (e.g., two tasks sharing the same LO).
 | `CHANNEL_COUNT_EXCEEDED` | `rx_count` or `tx_count` exceeds available channels          |
 | `SPECTRUM_CONFLICT`      | Requested RF slice overlaps an existing task's slice         |
 | `TIME_CONFLICT`          | Time window overlaps an incompatible task                    |
-| `RETUNE_CONFLICT`        | Requested CF ≠ active CF on a `shared_lo=true` device        |
+| `RETUNE_CONFLICT`        | Requested CF differs and combined window would exceed `sample_rate_max_sps` |
 | `NO_DEVICE_AVAILABLE`    | No single device satisfies all constraints                   |
 | `COHERENCY_UNAVAILABLE`  | Coherent group is not fully available or undersized          |
 | `TASK_LIMIT_REACHED`     | `max_concurrent_tasks` in policy is exhausted                |
@@ -866,7 +921,7 @@ Offset  Size  Type    Field
 |----------------------|--------------------------------------------------------------|------------------------------------------|
 | `IQ_FLAG_FIRST_PACKET` | First packet after stream start or resume                 | Reset DSP state / buffers                |
 | `IQ_FLAG_OVERFLOW`   | Hardware FIFO overflow; `num_samples` may be 0             | Log gap; do not use as clean IQ          |
-| `IQ_FLAG_DWELL_CHANGE` | Scan retune just completed; `center_freq_hz` is new CF   | Update frequency context in DSP          |
+| `IQ_FLAG_DWELL_CHANGE` | Retune completed (scan dwell or combined-window expansion); `center_freq_hz` and `sample_rate_sps` headers are updated | Re-read CF/SR from header; update DSP frequency context |
 
 ### 10.4 Gap Detection
 
@@ -986,10 +1041,11 @@ Both boards must be in `coherency_group = "refclk-group-0"` in `devices.xml`.
 
 ---
 
-### 11.3 Non-Coherent Request — Rejection: One Board Busy at Different CF
+### 11.3 Non-Coherent Request — Different CF, Combined Window Not Feasible
 
-Use case: `pluto-0` is running a task at 915 MHz (`shared_lo=true`). A second task
-requests 2400 MHz on the same board during the same window.
+Use case: `pluto-0` is running at 915 MHz (`shared_lo=true`). A second task requests
+2400 MHz — the 1485 MHz frequency gap exceeds the device's `sample_rate_max_sps`
+(61.44 MHz), so a combined window is impossible. Controller falls back to `pluto-1`.
 
 **Existing task**: `pluto-0`, CF=915 MHz, window [T, T+60s].
 
@@ -997,6 +1053,7 @@ requests 2400 MHz on the same board during the same window.
 ```json
 {
   "msg_type": "TASK_REQUEST_SCHEDULED",
+  "rank": 1,
   "rf": {
     "center_freq_hz":  2400000000.0,
     "bandwidth_hz":    5000000.0,
@@ -1008,8 +1065,8 @@ requests 2400 MHz on the same board during the same window.
 }
 ```
 
-**Response ← (REJECTED)** — `pluto-0` blocked; `pluto-1` free, but `preferred_device`
-was only a hint so the controller routes to `pluto-1`:
+**Response ← (ACCEPTED)** — combined window infeasible on `pluto-0`; `preferred_device`
+is advisory, so controller routes to `pluto-1`:
 ```json
 {
   "status": "ACCEPTED",
@@ -1017,7 +1074,7 @@ was only a hint so the controller routes to `pluto-1`:
 }
 ```
 
-If `pluto-1` were also busy at a conflicting CF:
+If all devices are at conflicting CFs with no combine path:
 ```json
 { "status": "REJECTED", "reject_code": "NO_DEVICE_AVAILABLE" }
 ```
@@ -1322,6 +1379,77 @@ Both release resources immediately and publish a final `TASK_STATUS`.
 
 ---
 
+### 11.18 Combined-Window Retune with Single-Channel Multicast
+
+Use case: Task A is already streaming at 100 MHz / 100 kHz BW on `pluto-0`. Task B
+arrives requesting 101 MHz / 100 kHz BW. The 1 MHz frequency gap fits within
+`sample_rate_max_sps`. Both tasks are served from the same physical channel.
+
+**Existing Task A** (already RUNNING): CF=100 MHz, SR=1 MHz, channel 0.
+
+**Task B request →**
+```json
+{
+  "msg_type": "TASK_REQUEST_CONTINUOUS",
+  "rank": 0,
+  "rf": {
+    "center_freq_hz":  101000000.0,
+    "bandwidth_hz":    100000.0,
+    "sample_rate_sps": 1000000.0,
+    "rx_count": 1
+  },
+  "streaming": { "dest_ip": "10.0.1.20", "dest_ports": [5500] }
+}
+```
+
+**Combined-window computation** (internal):
+```
+combined_cf = (99.95 MHz + 101.05 MHz) / 2 = 100.5 MHz
+combined_sr = 1.1 MHz + 2 × 200 kHz       = 1.5 MHz
+```
+
+**Task B response ← (ACCEPTED)** — same channel as Task A:
+```json
+{
+  "status": "ACCEPTED",
+  "task_id": "task-B",
+  "streams": [{
+    "device_id":       "pluto-0",
+    "channel_index":   0,
+    "udp_port":        5500,
+    "center_freq_hz":  100500000.0,
+    "slice_offset_hz": 500000.0,
+    "slice_bw_hz":     100000.0,
+    "sample_rate_sps": 1500000.0
+  }]
+}
+```
+
+**Task A TASK_STATUS update** (published to `sdr.status`):
+```json
+{
+  "msg_type": "TASK_STATUS",
+  "task_id":  "task-A",
+  "state":    "RUNNING",
+  "streams": [{
+    "channel_index":   0,
+    "center_freq_hz":  100500000.0,
+    "slice_offset_hz": -500000.0,
+    "sample_rate_sps": 1500000.0
+  }]
+}
+```
+
+Task A's IQ stream is now tagged with `IQ_FLAG_DWELL_CHANGE` for the transition
+packet. Task A's DSP client reads the updated `center_freq_hz` and `sample_rate_sps`
+from the packet header and adjusts its digital downconversion by `slice_offset_hz`.
+
+Both tasks receive identical wideband 1.5 MHz IQ packets on their respective UDP
+ports. Neither task is interrupted — the hardware retune discards only the PLL-settle
+window (≈ 256 samples).
+
+---
+
 ## 12. OPERATIONAL FLOW DIAGRAMS
 
 ### 12.1 Scheduled Task — Normal Lifecycle
@@ -1373,7 +1501,30 @@ IQStreamer    ─────UDP packets, cf=2.4 GHz, flag[DWELL_CHANGE]=1 on fi
               [repeat=true → back to step 1]
 ```
 
-### 12.4 Triggered Capture
+### 12.4 Combined-Window Multicast
+
+```
+Task A running at CF_A:
+  SoapySDR stream (ch 0) ──► IQStreamer ──UDP to A's port──► DSP pod A
+
+Task B arrives at CF_B (nearby):
+  Controller computes combined_cf / combined_sr
+  dev->tune(combined_cf, combined_sr)          ← hardware retune
+  IQStreamer.pauseForRetune(N)                 ← drain PLL settle
+  IQStreamer.updateCenterFreq(combined_cf)
+  IQStreamer.updateSampleRate(combined_sr)
+  TASK_STATUS(A, RUNNING, new slice_offset_hz) → sdr.status
+
+  activateTask(B):
+    channel_states_["pluto-0:0"] found         ← channel already live
+    IQStreamer.addDest("task-B", port=5500)     ← NO new stream opened
+
+After combine:
+  SoapySDR stream (ch 0) ──► IQStreamer ──UDP to A's port──► DSP pod A (slice_offset=-500kHz)
+                                        └──UDP to B's port──► DSP pod B (slice_offset=+500kHz)
+```
+
+### 12.5 Triggered Capture
 
 ```
 TriggerMonitor reads SoapySDR stream continuously:
@@ -1395,3 +1546,4 @@ TriggerMonitor reads SoapySDR stream continuously:
 | 2.0     | Add scan, snapshot, triggered, calibration; UDP format; multi-device; full reject codes |
 | 2.1     | Add TASK_STATUS, DEVICE_HEALTH, CONTROLLER_HEALTH, HEALTH_QUERY_RESPONSE definitions; task lifecycle state machine; full scenarios section; `shared_lo` coherence mode; `coherency_group` cross-board DF |
 | 2.2     | **`rank` field required** on all `TASK_REQUEST_*` messages; rank-based preemption (§4.2); `terminal_reason` and `rank` fields added to `TASK_STATUS`; `priority` field added to `TASK_STATUS` |
+| 2.3     | **Combined-window retune** (§4.3): `shared_lo=true` devices now expand their RF window to cover nearby tasks instead of rejecting with `RETUNE_CONFLICT`; **single-channel IQ multicast**: both tasks share one physical channel and receive independent wideband UDP streams; `slice_offset_hz` can change mid-stream and is updated via `TASK_STATUS`; `IQ_FLAG_DWELL_CHANGE` now fires on combined-window retuning as well as scan dwells |

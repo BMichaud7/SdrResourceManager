@@ -71,9 +71,14 @@ falls outside the union of all loaded device ranges.
 **Channel coherence** is controlled per-device by `shared_lo` in `devices.xml`:
 
 - `shared_lo=true` (e.g. AD9361, LimeSDR MIMO): all RX channels on a board
-  share one LO and one RF window. The scheduler allocates **spectrum slices
-  inside this window** — all concurrent tasks on the device must share
-  `center_frequency` and `sample_rate`.
+  share one LO and one RF window. The scheduler first tries to pack new
+  slices within the existing window. When a new task requests a different
+  center frequency, the controller automatically computes a **combined
+  window** that covers both slices, retuning the hardware to the midpoint
+  frequency with an expanded sample rate. Both tasks then share one physical
+  channel — the IQStreamer multicasts the same wideband IQ to each task's
+  UDP endpoint. Each task's `slice_offset_hz` tells its DSP client where
+  within the wideband capture its sub-band is located.
 - `shared_lo=false` (e.g. RTL-SDR, HackRF, USRP B210): each channel tunes
   independently; concurrent tasks may use different center frequencies.
 
@@ -430,7 +435,7 @@ git clone https://github.com/BMichaud7/SdrResourceManager.git
 cd SdrResourceManager
 
 ./build.sh             # Release build — clones SdrTaskApi automatically
-./build.sh --tests     # Release build + run all 162 unit tests
+./build.sh --tests     # Release build + run all 173 unit tests
 ./build.sh --debug     # Debug build (AddressSanitizer + UBSan)
 ./build.sh --clean     # Wipe build/ and rebuild from scratch
 ./build.sh --no-clone  # Skip git-clone (SdrTaskApi already present)
@@ -493,7 +498,7 @@ docker push ghcr.io/BMichaud7/sdr-controller:2.2.0
 ## 9. Running Tests
 
 All unit tests use GoogleTest and run without hardware via `FakeSoapyDevice`, an
-in-process SoapySDR driver registered as `driver=fake`. Tests cover 162 cases across
+in-process SoapySDR driver registered as `driver=fake`. Tests cover 173 cases across
 all subsystems. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what each test file covers.
 
 ### Run tests locally (Ubuntu)
@@ -516,12 +521,12 @@ podman run --rm sdr-controller:test ctest --output-on-failure -V  # verbose
 
 | Test file | Subsystem | Key scenarios |
 |---|---|---|
-| `test_spectrum_timeline.cpp` | SpectrumTimeline | shared/independent LO, retune conflict, canFit logic, guard band |
+| `test_spectrum_timeline.cpp` | SpectrumTimeline | shared/independent LO, retune conflict, canFit, guard band, **combined-window / canCombine** |
 | `test_message_codec.cpp` | MessageCodec | all request/response encode+decode; required rank enforcement |
 | `test_config_parser.cpp` | ConfigParser | XML parsing, policy fields, error cases |
 | `test_udp_port_pool.cpp` | UdpPortPool | alloc/release/exhaustion, double-release safety |
-| `test_resource_manager.cpp` | ResourceManager | scheduling, coherent DF, hardware profiles, **rank preemption** |
-| `test_iq_streamer.cpp` | IQStreamer | packet headers, sequence numbers, overflow flag, error callback |
+| `test_resource_manager.cpp` | ResourceManager | scheduling, coherent DF, hardware profiles, **rank preemption**, **combined-window multicast** |
+| `test_iq_streamer.cpp` | IQStreamer | packet headers, sequence numbers, overflow flag, error callback, **multi-dest fan-out** |
 | `test_fft_engine.cpp` | FftEngine | tone peaks, averaging, plan lifecycle, zero-average rejection |
 | `test_scan_executor.cpp` | ScanExecutor | step order, done callback, repeat mode, stop |
 | `test_trigger_monitor.cpp` | TriggerMonitor | threshold trigger, max_captures, done callback |
@@ -977,9 +982,13 @@ EOF
 
 ### Task rejected with RETUNE_CONFLICT
 
-The device is already tuned to a different frequency for an active task.
-Either wait for the active task to complete, or request a task on the same
-center frequency, or use a different device.
+This reject code only fires when two tasks on a `shared_lo=true` device
+request frequencies so far apart that the combined RF window would exceed
+`sample_rate_max_sps`. For nearby frequencies the controller automatically
+expands the window and accepts both (see combined-window behavior in §1).
+If you still see `RETUNE_CONFLICT`: check the frequency gap vs. the device's
+`sample_rate_max_sps`, or route the second task to a different device via
+`preferred_device`.
 
 ### IQ stream not arriving at DSP pod
 
