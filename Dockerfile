@@ -37,6 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpthread-stubs0-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Clone SdrTaskApi as sibling (required by CMakeLists sibling detection)
+RUN git clone --depth 1 https://github.com/BMichaud7/SdrTaskApi.git /build/../SdrTaskApi
+
 WORKDIR /build
 
 # Copy source
@@ -45,6 +48,7 @@ COPY include/     include/
 COPY src/         src/
 COPY client/      client/
 COPY config/      config/
+COPY tests/       tests/
 
 # Build release
 RUN cmake -B build \
@@ -54,7 +58,13 @@ RUN cmake -B build \
     && cmake --install build
 
 
-# ── Stage 2: Runtime image ────────────────────────────────────────────────
+# ── Stage 2: Test runner ──────────────────────────────────────────────────
+# docker build --target test .
+FROM builder AS test
+RUN ctest --test-dir build --output-on-failure -V
+
+
+# ── Stage 3: Runtime image ────────────────────────────────────────────────
 FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
