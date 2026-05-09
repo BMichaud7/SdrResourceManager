@@ -307,8 +307,8 @@ TEST(MessageCodec, DecodeRankPropagates) {
     EXPECT_EQ(req->rank,     2);
 }
 
-TEST(MessageCodec, DecodeRankMissingReturnsNullopt) {
-    // rank is now required — omitting it must reject the message
+TEST(MessageCodec, DecodeRankMissingDefaultsToZero) {
+    // rank is optional — omitting it defaults to 0 (lowest priority)
     std::string body = json{
         {"msg_type",       "TASK_REQUEST_SCHEDULED"},
         {"schema_version", "2.0"},
@@ -322,7 +322,8 @@ TEST(MessageCodec, DecodeRankMissingReturnsNullopt) {
     }.dump();
 
     auto req = MessageCodec::decode(body);
-    EXPECT_FALSE(req.has_value()) << "Missing rank must be rejected";
+    ASSERT_TRUE(req.has_value()) << "Missing rank must be accepted (defaults to 0)";
+    EXPECT_EQ(req->rank, 0);
 }
 
 TEST(MessageCodec, EncodeTaskStatusHasRank) {
