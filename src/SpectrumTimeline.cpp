@@ -106,7 +106,11 @@ FitResult SpectrumTimeline::canFit(
         occ.push_back({s->slice_lo_hz - guard_hz, s->slice_hi_hz + guard_hz});
     std::sort(occ.begin(), occ.end());
 
-    double needed = bw_hz + 2.0*guard_hz;
+    // Guard band separates adjacent tasks. When there are no existing slots,
+    // there is nothing to guard against — don't include guard padding on the
+    // outer edges of the window so a task that fills the full device BW can fit.
+    double guard_inner = over.empty() ? 0.0 : guard_hz;
+    double needed = bw_hz + 2.0*guard_inner;
     double try_lo = win_lo;
     bool   placed = false;
     double p_lo=0, p_hi=0;
@@ -121,7 +125,7 @@ FitResult SpectrumTimeline::canFit(
         }
         if (!clash) {
             placed = true;
-            p_lo = try_lo + guard_hz;
+            p_lo = try_lo + guard_inner;
             p_hi = p_lo   + bw_hz;
             break;
         }
