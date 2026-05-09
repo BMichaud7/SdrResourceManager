@@ -485,12 +485,12 @@ cmake --build build-debug --parallel $(nproc)
 ### Build the container image
 
 ```bash
-# CentOS 10 test image — builds everything and runs GTest on start
-podman build -f Containerfile.centos10 -t sdr-controller:test .
+# Run unit tests only (Ubuntu 24.04, no hardware needed)
+podman build --target test -t sdr-controller:test .
 
-# Production Docker image
-docker build -t ghcr.io/BMichaud7/sdr-controller:2.2.0 .
-docker push ghcr.io/BMichaud7/sdr-controller:2.2.0
+# Production runtime image
+docker build -t ghcr.io/BMichaud7/sdr-controller:2.3.0 .
+docker push ghcr.io/BMichaud7/sdr-controller:2.3.0
 ```
 
 ---
@@ -509,20 +509,22 @@ cmake --build build --parallel $(nproc)
 ctest --test-dir build --output-on-failure -V
 ```
 
-### Run tests in a container (CentOS 10, no hardware needed)
+### Run tests in a container (no hardware needed)
 
 ```bash
-podman build -f Containerfile.centos10 -t sdr-controller:test .
-podman run --rm sdr-controller:test           # exits 0 on pass
-podman run --rm sdr-controller:test ctest --output-on-failure -V  # verbose
+podman build --target test -t sdr-controller:test .
+# or
+docker build --target test -t sdr-controller:test .
 ```
+
+The `Dockerfile` is multi-stage. `--target test` runs the 173 GTest cases inside an Ubuntu 24.04 builder and exits 0 on success.
 
 ### Test coverage summary
 
 | Test file | Subsystem | Key scenarios |
 |---|---|---|
 | `test_spectrum_timeline.cpp` | SpectrumTimeline | shared/independent LO, retune conflict, canFit, guard band, **combined-window / canCombine** |
-| `test_message_codec.cpp` | MessageCodec | all request/response encode+decode; required rank enforcement |
+| `test_message_codec.cpp` | MessageCodec | all request/response encode+decode; absent `rank` defaults to 0 |
 | `test_config_parser.cpp` | ConfigParser | XML parsing, policy fields, error cases |
 | `test_udp_port_pool.cpp` | UdpPortPool | alloc/release/exhaustion, double-release safety |
 | `test_resource_manager.cpp` | ResourceManager | scheduling, coherent DF, hardware profiles, **rank preemption**, **combined-window multicast** |
