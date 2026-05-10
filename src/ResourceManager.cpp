@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <cmath>
+#include <thread>
 
 namespace sdr {
 
@@ -339,7 +340,9 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
 
         bool activate_now = (rec.state == TaskState::PENDING);
         { std::lock_guard lock(reg_mu_); registry_[task_id] = rec; }
-        if (activate_now) activateTask(task_id);
+        // Run activateTask in a background thread so the proton AMQP thread
+        // is not blocked by SoapySDR hardware I/O (openRxStream can take seconds).
+        if (activate_now) std::thread([this, task_id]() { activateTask(task_id); }).detach();
         notifyStateChange(task_id);
         return resp;
     }
@@ -446,7 +449,9 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
 
     bool activate_now = (rec.state == TaskState::PENDING);
     { std::lock_guard lock(reg_mu_); registry_[task_id] = rec; }
-    if (activate_now) activateTask(task_id);
+    // Run activateTask in a background thread so the proton AMQP thread
+    // is not blocked by SoapySDR hardware I/O (openRxStream can take seconds).
+    if (activate_now) std::thread([this, task_id]() { activateTask(task_id); }).detach();
     notifyStateChange(task_id);
     return resp;
 }
@@ -682,7 +687,9 @@ TaskResponse ResourceManager::doAcceptCalibration(const TaskRequest& req) {
         registry_[task_id] = rec;
     }
 
-    activateTask(task_id);
+    // Run activateTask in a background thread so the proton AMQP thread
+    // is not blocked by SoapySDR hardware I/O (openRxStream can take seconds).
+    std::thread([this, task_id]() { activateTask(task_id); }).detach();
     notifyStateChange(task_id);
     return resp;
 }
@@ -920,6 +927,18 @@ void ResourceManager::activateTask(const std::string& task_id) {
         spdlog::error("activateTask [{}]: no allocations", task_id); return;
     }
 
+    // Serialize hardware open/close across background threads — only one task at a
+    // time may open a SoapySDR stream.  The lock is stored in TaskRuntime and
+    // released in deactivateTask after the stream is closed.
+    std::unique_lock<std::mutex> hw_lock(hw_activation_mu_);
+
+    // Check state again after acquiring hw_lock: task may have been cancelled while waiting.
+    {
+        std::lock_guard lock(reg_mu_);
+        auto it = registry_.find(task_id);
+        if (it == registry_.end() || isTerminalState(it->second.state)) return;
+    }
+
     TaskRuntime rt;
     rt.device = nullptr; // set to first device below (used for scan/trigger)
 
@@ -1092,6 +1111,10 @@ void ResourceManager::activateTask(const std::string& task_id) {
         rt.trig_mon->start();
     }
 
+    // Transfer the hw_lock into the runtime so deactivateTask releases it
+    // after closing the stream (not before IQStreamer is stopped).
+    rt.hw_lock = std::move(hw_lock);
+
     {
         std::lock_guard lock(rt_mu_);
         runtimes_[task_id] = std::move(rt);
@@ -1115,14 +1138,20 @@ void ResourceManager::deactivateTask(const std::string& task_id,
     spdlog::info("deactivateTask [{}] → {} reason={}",
                  task_id, taskStateToString(terminal_state), reason);
 
-    // Stop runtime objects
+    // Stop runtime objects.
+    // IMPORTANT: scan_exec/trig_mon are moved out of the runtime and stopped
+    // AFTER releasing rt_mu_.  Their done-callbacks call deactivateTask which
+    // also acquires rt_mu_; stopping them while holding rt_mu_ would deadlock.
+    std::unique_ptr<ScanExecutor>    scan_exec_to_stop;
+    std::unique_ptr<TriggerMonitor>  trig_mon_to_stop;
     {
         std::lock_guard lock(rt_mu_);
         auto it = runtimes_.find(task_id);
         if (it != runtimes_.end()) {
             auto& rt = it->second;
-            if (rt.scan_exec) rt.scan_exec->stop();
-            if (rt.trig_mon)  rt.trig_mon->stop();
+            // Steal the executor/monitor so we can stop them without the lock.
+            scan_exec_to_stop = std::move(rt.scan_exec);
+            trig_mon_to_stop  = std::move(rt.trig_mon);
 
             // Remove this task's UDP dest from each shared streamer.
             // Stop the streamer and close the SoapySDR stream only when
@@ -1150,9 +1179,16 @@ void ResourceManager::deactivateTask(const std::string& task_id,
                     d->closeStream(s);
                 }
             }
+            // Release hw_activation_mu_ AFTER the stream is closed so the next
+            // background activation thread can safely open hardware.
+            if (rt.hw_lock.owns_lock()) rt.hw_lock.unlock();
             runtimes_.erase(it);
         }
     }
+    // Stop executors outside rt_mu_ — their done-callbacks call deactivateTask
+    // which needs rt_mu_, so joining them inside would deadlock.
+    if (scan_exec_to_stop) scan_exec_to_stop->stop();
+    if (trig_mon_to_stop)  trig_mon_to_stop->stop();
 
     // Release timeline slots and ports
     {

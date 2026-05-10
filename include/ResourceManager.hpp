@@ -100,9 +100,16 @@ private:
         std::vector<std::shared_ptr<IQStreamer>> streamers;
         std::unique_ptr<ScanExecutor>            scan_exec;
         std::unique_ptr<TriggerMonitor>          trig_mon;
+        // Held during hardware open; released in deactivateTask after stream close.
+        // Prevents concurrent activations from racing on the same device.
+        std::unique_lock<std::mutex>             hw_lock;
     };
     mutable std::mutex                              rt_mu_;
     std::unordered_map<std::string, TaskRuntime>    runtimes_;
+
+    // Serializes SoapySDR hardware open/close across background activation threads.
+    // Held in TaskRuntime::hw_lock for the task's lifetime; released on deactivation.
+    std::mutex hw_activation_mu_;
 
     std::chrono::steady_clock::time_point start_time_;
 
