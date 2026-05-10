@@ -6,7 +6,9 @@
 #include <proton/reconnect_options.hpp>
 #include <proton/transport.hpp>
 #include <proton/sender.hpp>
+#include <proton/sender_options.hpp>
 #include <proton/receiver.hpp>
+#include <proton/receiver_options.hpp>
 #include <proton/delivery.hpp>
 #include <proton/work_queue.hpp>
 #include <proton/source_options.hpp>
@@ -47,10 +49,19 @@ public:
 
     void on_connection_open(proton::connection& c) override {
         spdlog::info("AmqpClient: connected to {}", cfg_.url);
-        // Open receiver on request queue
-        c.open_receiver(cfg_.request_queue);
-        // Open senders
-        response_sender_ = c.open_sender(cfg_.response_queue);
+
+        // Force ANYCAST routing on queues so Artemis doesn't create MULTICAST
+        // addresses, which stall sender credit for ~15 seconds.
+        proton::receiver_options req_ropts;
+        req_ropts.source(proton::source_options().capabilities(
+            {proton::symbol("queue")}));
+        c.open_receiver(cfg_.request_queue, req_ropts);
+
+        proton::sender_options resp_sopts;
+        resp_sopts.target(proton::target_options().capabilities(
+            {proton::symbol("queue")}));
+        response_sender_ = c.open_sender(cfg_.response_queue, resp_sopts);
+
         status_sender_   = c.open_sender(cfg_.status_topic);
         health_sender_   = c.open_sender(cfg_.health_topic);
         parent_.onConnected();
@@ -80,7 +91,10 @@ public:
     }
 
     void sendOn(proton::sender& s, const std::string& body) {
-        if (!s || !s.credit()) return;
+        if (!s) return;
+        // Do NOT check s.credit() — proton queues the message and sends it
+        // when credit arrives. Checking credit causes silent drops when a
+        // fresh receiver hasn't yet propagated credit back to this sender.
         try {
             proton::message m;
             m.body(body);
@@ -131,9 +145,10 @@ void AmqpClient::stop() {
 
 void AmqpClient::sendResponse(const std::string& body) {
     if (!connected_) { spdlog::warn("AmqpClient: sendResponse while disconnected"); return; }
-    container_->schedule(proton::duration(0), [this, body]() {
-        handler_->sendOn(handler_->response_sender_, body);
-    });
+    // sendResponse is always called from within on_message (proton thread),
+    // so calling sendOn directly is safe and avoids the ~15s schedule delay
+    // caused by the proton event loop's AMQP idle-timeout wake interval.
+    handler_->sendOn(handler_->response_sender_, body);
 }
 
 void AmqpClient::sendStatus(const std::string& body) {

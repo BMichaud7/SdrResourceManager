@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SdrResourceManager integration-test config — null SoapySDR driver -->
+<sdr_controller version="2.0">
+
+  <broker>
+    <url>amqp://localhost:5675</url>
+    <username>sdr_ctrl</username>
+    <password>test_password</password>
+    <request_queue>sdr.task.request</request_queue>
+    <response_queue>sdr.task.response</response_queue>
+    <status_topic>sdr.status</status_topic>
+    <health_topic>sdr.health</health_topic>
+    <reconnect_interval_sec>3</reconnect_interval_sec>
+    <max_reconnect_interval_sec>15</max_reconnect_interval_sec>
+    <send_queue_depth>256</send_queue_depth>
+  </broker>
+
+  <policy>
+    <max_concurrent_tasks>16</max_concurrent_tasks>
+    <guard_band_hz>200000</guard_band_hz>
+    <usable_bw_fraction>0.80</usable_bw_fraction>
+    <default_task_timeout_ms>30000</default_task_timeout_ms>
+    <scheduler_tick_ms>100</scheduler_tick_ms>
+    <watchdog_tick_ms>500</watchdog_tick_ms>
+    <udp_port_pool_start>30000</udp_port_pool_start>
+    <udp_port_pool_end>30099</udp_port_pool_end>
+    <iq_packet_samples>128</iq_packet_samples>
+    <retune_conflict_policy>REJECT_NEW</retune_conflict_policy>
+    <heartbeat_interval_ms>5000</heartbeat_interval_ms>
+  </policy>
+
+  <devices>
+    <device id="mock-0">
+      <driver>null</driver>
+      <uri>null</uri>
+      <label>Mock SDR Unit 0 (null driver)</label>
+      <streaming_source_ip>127.0.0.1</streaming_source_ip>
+      <coherency_group>test-group-0</coherency_group>
+      <shared_lo>true</shared_lo>
+      <capabilities>
+        <rx_channels>2</rx_channels>
+        <tx_channels>2</tx_channels>
+        <freq_min_hz>70000000</freq_min_hz>
+        <freq_max_hz>6000000000</freq_max_hz>
+        <bandwidth_max_hz>56000000</bandwidth_max_hz>
+        <sample_rate_max_sps>61440000</sample_rate_max_sps>
+        <rx_gain_min_db>-3</rx_gain_min_db>
+        <rx_gain_max_db>71</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>89</tx_atten_max_db>
+      </capabilities>
+    </device>
+
+    <device id="mock-1">
+      <driver>null</driver>
+      <uri>null</uri>
+      <label>Mock SDR Unit 1 (null driver)</label>
+      <streaming_source_ip>127.0.0.1</streaming_source_ip>
+      <coherency_group>test-group-0</coherency_group>
+      <shared_lo>true</shared_lo>
+      <capabilities>
+        <rx_channels>2</rx_channels>
+        <tx_channels>2</tx_channels>
+        <freq_min_hz>70000000</freq_min_hz>
+        <freq_max_hz>6000000000</freq_max_hz>
+        <bandwidth_max_hz>56000000</bandwidth_max_hz>
+        <sample_rate_max_sps>61440000</sample_rate_max_sps>
+        <rx_gain_min_db>-3</rx_gain_min_db>
+        <rx_gain_max_db>71</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>89</tx_atten_max_db>
+      </capabilities>
+    </device>
+  </devices>
+
+</sdr_controller>

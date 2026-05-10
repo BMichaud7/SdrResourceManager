@@ -58,10 +58,23 @@ RUN cmake -B build \
     && cmake --install build
 
 
-# ── Stage 2: Test runner ──────────────────────────────────────────────────
+# ── Stage 2: Unit test runner ─────────────────────────────────────────────
 # docker build --target test .
 FROM builder AS test
 RUN ctest --test-dir build --output-on-failure -V
+
+
+# ── Stage 2b: Integration test runner ────────────────────────────────────
+# Minimal image used by run_integration_tests.sh to run e2e_test.py
+FROM ubuntu:24.04 AS test-integ
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-qpid-proton \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY test-env/e2e_test.py /e2e_test.py
 
 
 # ── Stage 3: Runtime image ────────────────────────────────────────────────
