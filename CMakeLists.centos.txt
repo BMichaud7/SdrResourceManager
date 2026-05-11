@@ -22,22 +22,24 @@ add_link_options(
 # ── PkgConfig ─────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
 
-# ── SdrTaskApi ────────────────────────────────────────────────────────────────
-# Expected as a sibling directory — see Containerfile.centos10 which copies
-# both repos into /build before running cmake.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrTaskApi/CMakeLists.txt")
-    message(STATUS "SdrTaskApi: using sibling source at ../SdrTaskApi")
+# ── SdrSdk (provides sdr_task_api types via its subdirectory) ─────────────────
+# Containerfile.centos10 copies SdrSdk/ and SdrTaskApi/ as siblings in /build.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrSdk/CMakeLists.txt")
+    message(STATUS "SdrResourceManager: using sibling SdrSdk at ../SdrSdk")
+    set(SDRSDK_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDRSDK_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    add_subdirectory(../SdrSdk ${CMAKE_BINARY_DIR}/SdrSdk)
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrTaskApi/CMakeLists.txt")
+    message(STATUS "SdrResourceManager: using sibling SdrTaskApi at ../SdrTaskApi")
     add_subdirectory(../SdrTaskApi ${CMAKE_BINARY_DIR}/SdrTaskApi)
 else()
     find_package(sdr_task_api QUIET)
     if(NOT sdr_task_api_FOUND)
         message(FATAL_ERROR
-            "\n[SdrResourceManager] SdrTaskApi not found.\n"
-            "  Clone as a sibling directory:\n"
-            "    git clone https://github.com/BMichaud7/SdrTaskApi.git ../SdrTaskApi\n"
-            "  Both repos must share the same parent directory.\n")
+            "\n[SdrResourceManager] SdrSdk not found.\n"
+            "  Both SdrSdk/ and SdrTaskApi/ must be present as sibling directories.\n")
     endif()
-    message(STATUS "SdrTaskApi: using installed package ${sdr_task_api_VERSION}")
+    message(STATUS "SdrResourceManager: using installed sdr_task_api ${sdr_task_api_VERSION}")
 endif()
 
 # ── SoapySDR (built from source via Containerfile.centos10) ───────────────────

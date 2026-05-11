@@ -22,25 +22,27 @@ add_link_options(
 # ── PkgConfig ─────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
 
-# ── SdrTaskApi ────────────────────────────────────────────────────────────────
-# Expected as a sibling directory: ../SdrTaskApi  (same parent as this repo).
-# Falls back to a system-installed cmake package.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrTaskApi/CMakeLists.txt")
-    message(STATUS "SdrTaskApi: using sibling source at ../SdrTaskApi")
+# ── SdrSdk (provides sdr_task_api types via its subdirectory) ─────────────────
+# Expected as a sibling directory: ../SdrSdk  (same parent as this repo).
+# SdrSdk itself expects ../SdrTaskApi as its own sibling.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrSdk/CMakeLists.txt")
+    message(STATUS "SdrResourceManager: using sibling SdrSdk at ../SdrSdk")
+    set(SDRSDK_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDRSDK_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    add_subdirectory(../SdrSdk ${CMAKE_BINARY_DIR}/SdrSdk)
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../SdrTaskApi/CMakeLists.txt")
+    message(STATUS "SdrResourceManager: using sibling SdrTaskApi at ../SdrTaskApi")
     add_subdirectory(../SdrTaskApi ${CMAKE_BINARY_DIR}/SdrTaskApi)
 else()
     find_package(sdr_task_api QUIET)
     if(NOT sdr_task_api_FOUND)
         message(FATAL_ERROR
-            "\n[SdrResourceManager] SdrTaskApi not found.\n"
-            "  Option 1 — clone as a sibling directory (recommended):\n"
-            "    git clone https://github.com/BMichaud7/SdrTaskApi.git "
-            "$(dirname $(pwd))/SdrTaskApi\n"
-            "  Option 2 — install system-wide and set sdr_task_api_DIR.\n"
-            "  Both repos must share the same parent directory for "
-            "the sibling path to resolve automatically.\n")
+            "\n[SdrResourceManager] SdrSdk not found.\n"
+            "  Clone as sibling directories:\n"
+            "    git clone https://github.com/BMichaud7/SdrSdk.git ../SdrSdk\n"
+            "    git clone https://github.com/BMichaud7/SdrTaskApi.git ../SdrTaskApi\n")
     endif()
-    message(STATUS "SdrTaskApi: using installed package ${sdr_task_api_VERSION}")
+    message(STATUS "SdrResourceManager: using installed sdr_task_api ${sdr_task_api_VERSION}")
 endif()
 
 # ── SoapySDR ──────────────────────────────────────────────────────────────────

@@ -84,12 +84,14 @@ RUN git clone --depth 1 \
 RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/local.conf && ldconfig
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  STEP 5 — Copy both sibling repos, then build
-#  SdrTaskApi is placed at ../SdrTaskApi relative to SdrResourceManager so
-#  the CMakeLists add_subdirectory(../SdrTaskApi ...) resolves correctly.
+#  STEP 5 — Copy all sibling repos, then build
+#  SdrSdk is placed at ../SdrSdk relative to SdrResourceManager so the
+#  CMakeLists add_subdirectory(../SdrSdk ...) resolves correctly.
+#  SdrTaskApi is placed at ../SdrTaskApi relative to SdrSdk (its sibling).
 #  nlohmann/json and GTest are fetched from GitHub during cmake configure.
 # ─────────────────────────────────────────────────────────────────────────────
-COPY SdrTaskApi/       /build/SdrTaskApi/
+COPY SdrTaskApi/         /build/SdrTaskApi/
+COPY SdrSdk/             /build/SdrSdk/
 COPY SdrResourceManager/ /build/SdrResourceManager/
 
 RUN cp /build/SdrResourceManager/CMakeLists.centos.txt \
