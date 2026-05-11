@@ -22,7 +22,12 @@ void ScanExecutor::start() {
 
 void ScanExecutor::stop() {
     running_.store(false);
-    if (thread_.joinable()) thread_.join();
+    if (!thread_.joinable()) return;
+    // If called from the scan thread itself (via done-callback), joining would deadlock.
+    if (thread_.get_id() == std::this_thread::get_id())
+        thread_.detach();
+    else
+        thread_.join();
 }
 
 void ScanExecutor::loop() {

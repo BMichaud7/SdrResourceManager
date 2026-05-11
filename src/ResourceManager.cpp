@@ -1121,8 +1121,21 @@ void ResourceManager::activateTask(const std::string& task_id) {
     }
     {
         std::lock_guard lock(reg_mu_);
-        if (registry_.count(task_id))
-            registry_[task_id].state = TaskState::RUNNING;
+        if (registry_.count(task_id)) {
+            auto& r = registry_[task_id];
+            // For IMMEDIATE tasks the stop_time was computed at acceptance time.
+            // If hw activation was delayed (waiting on hw_activation_mu_) the
+            // deadline may already be past.  Reset it so the task gets its full
+            // intended duration from the moment hardware is actually running.
+            if (r.schedule_mode == ScheduleMode::IMMEDIATE &&
+                r.stop_time_ms  != TIME_INFINITE) {
+                int64_t duration_ms = r.stop_time_ms - r.start_time_ms;
+                int64_t now2        = nowMs();
+                r.start_time_ms = now2;
+                r.stop_time_ms  = now2 + duration_ms;
+            }
+            r.state = TaskState::RUNNING;
+        }
     }
 
     std::string dev_list;
