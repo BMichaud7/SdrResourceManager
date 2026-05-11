@@ -21,7 +21,26 @@ bool RadioDevice::open() {
         spdlog::info("[{}] Opening: driver={} uri={}", cfg_.id, cfg_.driver, cfg_.uri);
         dev_ = SoapySDR::Device::make(args);
         if (!dev_) { spdlog::error("[{}] make() returned nullptr", cfg_.id); return false; }
-        spdlog::info("[{}] OK hw={} drv={}", cfg_.id, dev_->getHardwareKey(), dev_->getDriverKey());
+
+        // Clamp configured channel count to what the hardware actually exports.
+        // Prevents accepting tasks that request more channels than exist, which
+        // would crash the worker thread when readStream fails on the invalid channel.
+        int hw_rx = (int)dev_->getNumChannels(SOAPY_SDR_RX);
+        int hw_tx = (int)dev_->getNumChannels(SOAPY_SDR_TX);
+        if (cfg_.caps.rx_channels > hw_rx) {
+            spdlog::warn("[{}] config rx_channels={} > hw={}, clamping",
+                         cfg_.id, cfg_.caps.rx_channels, hw_rx);
+            cfg_.caps.rx_channels = hw_rx;
+        }
+        if (cfg_.caps.tx_channels > hw_tx) {
+            spdlog::warn("[{}] config tx_channels={} > hw={}, clamping",
+                         cfg_.id, cfg_.caps.tx_channels, hw_tx);
+            cfg_.caps.tx_channels = hw_tx;
+        }
+
+        spdlog::info("[{}] OK hw={} drv={} rx_ch={} tx_ch={}",
+                     cfg_.id, dev_->getHardwareKey(), dev_->getDriverKey(),
+                     cfg_.caps.rx_channels, cfg_.caps.tx_channels);
         online_.store(true, std::memory_order_release);
         return true;
     } catch (const std::exception& ex) {

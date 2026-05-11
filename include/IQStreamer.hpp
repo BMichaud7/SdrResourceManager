@@ -13,6 +13,14 @@ namespace sdr {
 
 class IQStreamer {
 public:
+    // Extra channel descriptor for multi-channel shared streams.
+    struct ChannelDest {
+        int         channel_index = 0;
+        std::string stream_id;
+        std::string dest_ip;
+        int         dest_port     = 0;
+    };
+
     struct Config {
         std::string task_id;
         std::string stream_id;
@@ -22,6 +30,10 @@ public:
         int         packet_samples = 1024;
         int64_t     task_start_ms  = 0;
         double      sample_rate    = 0.0;
+        // Channels 1..N of a multi-channel SoapySDR stream.
+        // When non-empty, workerLoop reads N+1 buffers and demuxes each channel
+        // to its own UDP port — only ONE IQStreamer owns the stream.
+        std::vector<ChannelDest> extra_channels;
     };
 
     IQStreamer(const Config& cfg,
@@ -79,6 +91,8 @@ private:
 
     void workerLoop();
     void sendPacket(const float* s, uint16_t n, uint64_t ts_ns, uint8_t flags);
+    void sendPacketToFd(int fd, uint32_t& seq, int ch_idx,
+                        const float* s, uint16_t n, uint64_t ts_ns, uint8_t flags);
 };
 
 } // namespace sdr

@@ -156,19 +156,64 @@ void IQStreamer::sendPacket(const float* samples, uint16_t n, uint64_t ts_ns, ui
     if (flags & IQ_FLAG_OVERFLOW) ++metrics_.overflows;
 }
 
+// ── Per-fd packet send (extra channels in multi-channel mode) ─────────────────
+
+void IQStreamer::sendPacketToFd(int fd, uint32_t& seq, int ch_idx,
+                                 const float* samples, uint16_t n,
+                                 uint64_t ts_ns, uint8_t flags) {
+    IqPacketHeader hdr{};
+    hdr.magic          = IQ_PACKET_MAGIC;
+    hdr.sequence       = seq++;
+    hdr.timestamp_ns   = ts_ns;
+    hdr.center_freq_hz = (uint64_t)current_cf_.load(std::memory_order_relaxed);
+    hdr.sample_rate    = current_sr_hz_.load(std::memory_order_relaxed);
+    hdr.num_samples    = n;
+    hdr.channel_index  = (uint8_t)ch_idx;
+    hdr.flags          = flags;
+    struct iovec iov[2];
+    iov[0].iov_base = &hdr;
+    iov[0].iov_len  = sizeof(hdr);
+    iov[1].iov_base = const_cast<float*>(samples);
+    iov[1].iov_len  = (size_t)n * 2 * sizeof(float);
+    struct msghdr msg{};
+    msg.msg_iov    = iov;
+    msg.msg_iovlen = 2;
+    ::sendmsg(fd, &msg, MSG_DONTWAIT);
+}
+
 // ── Worker loop ──────────────────────────────────────────────────────────────
 
 void IQStreamer::workerLoop() {
-    const int N = cfg_.packet_samples;
-    std::vector<float> buf((size_t)N*2);
-    void* bufs[1] = {buf.data()};
+    const int N    = cfg_.packet_samples;
+    const int n_ch = 1 + (int)cfg_.extra_channels.size();
+
+    // Per-channel sample buffers — one per SoapySDR channel in the stream.
+    std::vector<std::vector<float>> ch_bufs(n_ch, std::vector<float>((size_t)N*2));
+    std::vector<void*> soapy_bufs(n_ch);
+    for (int i = 0; i < n_ch; ++i) soapy_bufs[i] = ch_bufs[i].data();
+
+    // Open UDP sockets for extra channels (channel 0 uses the existing dests_ mechanism).
+    std::vector<int> extra_fds;
+    std::vector<uint32_t> extra_seqs(cfg_.extra_channels.size(), 0u);
+    for (auto& ec : cfg_.extra_channels) {
+        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        int sndbuf = 8*1024*1024;
+        ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+        sockaddr_in dst{};
+        dst.sin_family      = AF_INET;
+        dst.sin_port        = htons((uint16_t)ec.dest_port);
+        dst.sin_addr.s_addr = ::inet_addr(ec.dest_ip.c_str());
+        ::connect(fd, (sockaddr*)&dst, sizeof(dst));
+        extra_fds.push_back(fd);
+    }
+
     int flags=0; long long hw_ts=0;
     auto t0 = steady_clock::now();
     int errs=0;
     bool first=true;
 
     while (running_.load(std::memory_order_acquire)) {
-        int ret = dev_->readStream(stream_, bufs, (size_t)N, flags, hw_ts, 500'000LL);
+        int ret = dev_->readStream(stream_, soapy_bufs.data(), (size_t)N, flags, hw_ts, 500'000LL);
         if (!running_.load(std::memory_order_acquire)) break;
         if (ret == SOAPY_SDR_TIMEOUT) continue;
 
@@ -179,13 +224,20 @@ void IQStreamer::workerLoop() {
             spdlog::error("IQStreamer [{}] readStream error {} ({})",
                           cfg_.stream_id, SoapySDR::errToStr(ret), errs);
             if (errs>=20) {
-                if (on_error_) on_error_(cfg_.task_id, SoapySDR::errToStr(ret));
+                if (on_error_) {
+                    // Fire callback from a separate thread — calling it directly
+                    // would deadlock: deactivateTask → stop() → join() cannot
+                    // join the calling (worker) thread from itself.
+                    auto cb  = on_error_;
+                    auto tid = cfg_.task_id;
+                    auto msg = std::string(SoapySDR::errToStr(ret));
+                    std::thread([cb, tid, msg](){ cb(tid, msg); }).detach();
+                }
                 break;
             }
             continue;
         } else { errs=0; }
 
-        // Drain settle samples after a retune — read hardware but discard UDP send
         if (int rem = drain_countdown_.load(std::memory_order_acquire); rem > 0) {
             drain_countdown_.fetch_sub(1, std::memory_order_release);
             continue;
@@ -196,16 +248,30 @@ void IQStreamer::workerLoop() {
 
         uint64_t ts_ns = (uint64_t)duration_cast<nanoseconds>(steady_clock::now()-t0).count();
         uint16_t nsamples = ret>0 ? (uint16_t)std::min(ret,N) : 0u;
-        if (nsamples>0||pkt_flags) sendPacket(buf.data(), nsamples, ts_ns, pkt_flags);
 
-        if (nsamples>=64) {
+        // Primary channel (index 0 in soapy_bufs → cfg_.channel_index)
+        if (nsamples>0 || pkt_flags)
+            sendPacket(ch_bufs[0].data(), nsamples, ts_ns, pkt_flags);
+
+        // Extra channels: each gets its own buffer, sequence counter, and UDP socket
+        for (int i = 0; i < (int)cfg_.extra_channels.size(); ++i) {
+            if (nsamples>0 || pkt_flags)
+                sendPacketToFd(extra_fds[i], extra_seqs[i],
+                               cfg_.extra_channels[i].channel_index,
+                               ch_bufs[i+1].data(), nsamples, ts_ns, pkt_flags);
+        }
+
+        if (nsamples >= 64) {
             float rms_sq=0;
-            for (int i=0;i<64*2;++i) rms_sq+=buf[static_cast<size_t>(i)]*buf[static_cast<size_t>(i)];
+            for (int i=0; i<64*2; ++i)
+                rms_sq += ch_bufs[0][static_cast<size_t>(i)] * ch_bufs[0][static_cast<size_t>(i)];
             float rdbfs = 10.f*std::log10(rms_sq/64.f+1e-30f);
             std::lock_guard lock(mu_);
             metrics_.rssi_dbfs = 0.95f*metrics_.rssi_dbfs + 0.05f*rdbfs;
         }
     }
+
+    for (int fd : extra_fds) ::close(fd);
 }
 
 StreamMetrics IQStreamer::getMetrics() const {
