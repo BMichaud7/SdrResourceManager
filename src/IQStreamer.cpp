@@ -74,6 +74,69 @@ int IQStreamer::destCount() const {
     return (int)dests_.size();
 }
 
+// ── DDC sub-band fan-out ──────────────────────────────────────────────────────
+
+void IQStreamer::addSubBand(const std::string& task_id, const std::string& stream_id,
+                             int channel_index, const std::string& ip, int port,
+                             double cf_hz, double output_sr_hz, double wideband_sr_hz) {
+    SubBand sb;
+    sb.task_id        = task_id;
+    sb.stream_id      = stream_id;
+    sb.channel_index  = channel_index;
+    sb.center_freq_hz = (uint64_t)cf_hz;
+    sb.sample_rate_hz = (uint32_t)output_sr_hz;
+
+    sb.dest_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (sb.dest_fd < 0) {
+        spdlog::error("IQStreamer::addSubBand: socket() failed for {}:{}", ip, port);
+        return;
+    }
+    int sndbuf = 8 * 1024 * 1024;
+    ::setsockopt(sb.dest_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    sockaddr_in dst{};
+    dst.sin_family      = AF_INET;
+    dst.sin_port        = htons((uint16_t)port);
+    dst.sin_addr.s_addr = ::inet_addr(ip.c_str());
+    if (::connect(sb.dest_fd, (sockaddr*)&dst, sizeof(dst)) < 0) {
+        ::close(sb.dest_fd); sb.dest_fd = -1;
+        spdlog::error("IQStreamer::addSubBand: connect() failed for {}:{}", ip, port);
+        return;
+    }
+
+    int decim = (output_sr_hz > 0.0) ? (int)std::round(wideband_sr_hz / output_sr_hz) : 1;
+    if (decim < 1) decim = 1;
+    double offset_hz = cf_hz - current_cf_.load(std::memory_order_relaxed);
+    sb.ddc = std::make_unique<Ddc>(offset_hz, wideband_sr_hz, decim);
+    sb.out_buf.resize(((size_t)cfg_.packet_samples + 1) * 2, 0.0f);
+
+    std::lock_guard lock(dests_mu_);
+    subbands_.push_back(std::move(sb));
+    spdlog::debug("IQStreamer [{}] +subband {} cf={:.3f}MHz decim={} → {}:{}",
+                  cfg_.stream_id, task_id, cf_hz / 1e6, decim, ip, port);
+}
+
+int IQStreamer::removeSubBand(const std::string& task_id) {
+    std::lock_guard lock(dests_mu_);
+    auto it = std::find_if(subbands_.begin(), subbands_.end(),
+        [&](const SubBand& sb){ return sb.task_id == task_id; });
+    if (it != subbands_.end()) {
+        if (it->dest_fd >= 0) { ::close(it->dest_fd); it->dest_fd = -1; }
+        subbands_.erase(it);
+        spdlog::debug("IQStreamer [{}] -subband {}", cfg_.stream_id, task_id);
+    }
+    return (int)dests_.size() + (int)subbands_.size();
+}
+
+int IQStreamer::subBandCount() const {
+    std::lock_guard lock(dests_mu_);
+    return (int)subbands_.size();
+}
+
+int IQStreamer::totalConsumers() const {
+    std::lock_guard lock(dests_mu_);
+    return (int)dests_.size() + (int)subbands_.size();
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
 void IQStreamer::start() {
@@ -89,10 +152,13 @@ void IQStreamer::start() {
 void IQStreamer::stop() {
     if (!running_.exchange(false, std::memory_order_acq_rel)) return;
     if (thread_.joinable()) thread_.join();
-    // Close all dest sockets
-    std::lock_guard lock(dests_mu_);
-    for (auto& d : dests_) if (d.fd >= 0) { ::close(d.fd); d.fd = -1; }
-    dests_.clear();
+    {
+        std::lock_guard lock(dests_mu_);
+        for (auto& d : dests_) if (d.fd >= 0) { ::close(d.fd); d.fd = -1; }
+        dests_.clear();
+        for (auto& sb : subbands_) if (sb.dest_fd >= 0) { ::close(sb.dest_fd); sb.dest_fd = -1; }
+        subbands_.clear();
+    }
     spdlog::info("IQStreamer [{}] stopped pkts={} oflw={}",
                  cfg_.stream_id, metrics_.packets_sent, metrics_.overflows);
 }
@@ -154,6 +220,29 @@ void IQStreamer::sendPacket(const float* samples, uint16_t n, uint64_t ts_ns, ui
         metrics_.throughput_mbps = 0.9*metrics_.throughput_mbps + 0.1*(last_sent*8.0/1e6);
     }
     if (flags & IQ_FLAG_OVERFLOW) ++metrics_.overflows;
+}
+
+// ── Sub-band DDC packet send ──────────────────────────────────────────────────
+
+void IQStreamer::sendSubBandPacket(SubBand& sb, uint16_t n, uint64_t ts_ns, uint8_t flags) {
+    IqPacketHeader hdr{};
+    hdr.magic          = IQ_PACKET_MAGIC;
+    hdr.sequence       = sb.seq++;
+    hdr.timestamp_ns   = ts_ns;
+    hdr.center_freq_hz = sb.center_freq_hz;
+    hdr.sample_rate    = sb.sample_rate_hz;
+    hdr.num_samples    = n;
+    hdr.channel_index  = (uint8_t)sb.channel_index;
+    hdr.flags          = flags;
+    struct iovec iov[2];
+    iov[0].iov_base = &hdr;
+    iov[0].iov_len  = sizeof(hdr);
+    iov[1].iov_base = sb.out_buf.data();
+    iov[1].iov_len  = (size_t)n * 2 * sizeof(float);
+    struct msghdr msg{};
+    msg.msg_iov    = iov;
+    msg.msg_iovlen = 2;
+    ::sendmsg(sb.dest_fd, &msg, MSG_DONTWAIT);
 }
 
 // ── Per-fd packet send (extra channels in multi-channel mode) ─────────────────
@@ -259,6 +348,19 @@ void IQStreamer::workerLoop() {
                 sendPacketToFd(extra_fds[i], extra_seqs[i],
                                cfg_.extra_channels[i].channel_index,
                                ch_bufs[i+1].data(), nsamples, ts_ns, pkt_flags);
+        }
+
+        // DDC sub-band fan-out: mix + filter + decimate ch_bufs[0] per sub-band task
+        {
+            std::lock_guard lock(dests_mu_);
+            for (auto& sb : subbands_) {
+                if (!sb.ddc || sb.dest_fd < 0) continue;
+                int n_out = 0;
+                if (nsamples > 0)
+                    n_out = sb.ddc->process(ch_bufs[0].data(), nsamples, sb.out_buf.data());
+                if (n_out > 0 || pkt_flags)
+                    sendSubBandPacket(sb, (uint16_t)n_out, ts_ns, pkt_flags);
+            }
         }
 
         if (nsamples >= 64) {

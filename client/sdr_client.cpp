@@ -240,6 +240,15 @@ static std::string buildHealthQuery() {
     }.dump(2);
 }
 
+static std::string buildTempQuery() {
+    return json{
+        {"msg_type",       "DEVICE_TEMP_QUERY"},
+        {"schema_version", "2.0"},
+        {"timestamp_ms",   epochMs()},
+        {"request_id",     genUuid()}
+    }.dump(2);
+}
+
 // ─── Client messaging handler ────────────────────────────────────────────
 class ClientHandler : public proton::messaging_handler {
 public:
@@ -311,6 +320,20 @@ public:
                 }
             } else if (mt == "HEALTH_QUERY_RESPONSE") {
                 std::cout << "  HEALTH: " << body.substr(0,200) << "..." << std::endl;
+            } else if (mt == "DEVICE_TEMP_RESPONSE") {
+                std::cout << "  TEMPERATURES:" << std::endl;
+                for (auto& dev : j.value("devices", json::array())) {
+                    std::string did = dev.value("device_id","?");
+                    bool online     = dev.value("online", false);
+                    if (!online) { std::cout << "    " << did << ": offline" << std::endl; continue; }
+                    for (auto& s : dev.value("sensors", json::array())) {
+                        if (s["value_c"].is_null())
+                            std::cout << "    " << did << " / " << s["name"] << ": (read error)" << std::endl;
+                        else
+                            std::cout << "    " << did << " / " << s["name"]
+                                      << ": " << s["value_c"].get<double>() << " °C" << std::endl;
+                    }
+                }
             } else {
                 std::cout << "  " << body.substr(0, 300) << std::endl;
             }
@@ -347,7 +370,12 @@ private:
         send(buildHealthQuery());
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
-        // 2. Scheduled DF task
+        // 2. Temperature query
+        std::cout << "[SEND] DEVICE_TEMP_QUERY" << std::endl;
+        send(buildTempQuery());
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+        // 3. Scheduled DF task
         std::cout << "\n[SEND] TASK_REQUEST_SCHEDULED (DF, 2 RX, 60s window)" << std::endl;
         send(buildScheduledTask(dest_ip_));
         std::this_thread::sleep_for(std::chrono::seconds(2));

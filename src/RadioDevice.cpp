@@ -153,6 +153,27 @@ double RadioDevice::getTemperature() const {
     }
 }
 
+std::vector<RadioDevice::TempSensor> RadioDevice::listTemperatures() const {
+    std::lock_guard lock(mu_);
+    if (!online_ || !dev_) return {};
+    std::vector<TempSensor> out;
+    try {
+        for (auto& name : dev_->listSensors()) {
+            if (name.find("temp") == std::string::npos &&
+                name.find("Temp") == std::string::npos) continue;
+            double val = std::numeric_limits<double>::quiet_NaN();
+            try { val = std::stod(dev_->readSensor(name)); } catch (...) {}
+            out.push_back({name, val});
+        }
+    } catch (...) {
+        // listSensors() not supported — fall back to well-known "temp0"
+        double val = std::numeric_limits<double>::quiet_NaN();
+        try { val = std::stod(dev_->readSensor("temp0")); } catch (...) {}
+        if (!std::isnan(val)) out.push_back({"temp0", val});
+    }
+    return out;
+}
+
 double RadioDevice::currentCF() const { std::lock_guard l(mu_); return current_cf_; }
 double RadioDevice::currentRate() const { std::lock_guard l(mu_); return current_rate_; }
 

@@ -42,12 +42,18 @@ public:
     //                            pack slices within the shared RF window.
     // shared_lo=false:           skip CF/SR matching; only check channel count.
     //                            Each task tunes its own channels independently.
+    // preferred_channel: -1 = any free channel (default).
+    // ≥0 = assign this specific physical channel.  For shared_lo devices the
+    // channel may already be in use by another task at the same CF/SR — the
+    // scheduler is allowed to reuse it (fan-out / DDC); for independent-LO
+    // devices the channel must be free.
     FitResult canFit(int64_t t_start, int64_t t_stop,
                      double  cf_hz, double bw_hz, double sr_sps,
                      int rx_count, int tx_count,
                      int max_rx, int max_tx,
                      double guard_hz,
-                     bool shared_lo = true) const;
+                     bool shared_lo = true,
+                     int  preferred_channel = -1) const;
 
     // Returns a combined RF window if a new slice at cf_hz/bw_hz can be
     // accommodated by expanding the shared device window to cover both the

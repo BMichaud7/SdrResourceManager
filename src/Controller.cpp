@@ -1,6 +1,7 @@
 #include "Controller.hpp"
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <cmath>
 #include <thread>
 
 namespace sdr {
@@ -67,6 +68,7 @@ void Controller::onMessage(const std::string& body) {
     if (req->msg_type=="TASK_STOP")                  return handleTaskStop(*req);
     if (req->msg_type=="TASK_CANCEL")                return handleTaskCancel(*req);
     if (req->msg_type=="HEALTH_QUERY")               return handleHealthQuery(*req);
+    if (req->msg_type=="DEVICE_TEMP_QUERY")          return handleTempQuery(*req);
     if (req->msg_type=="TASK_REQUEST_SNAPSHOT")      return handleSnapshotRequest(*req);
     return handleTaskRequest(*req);
 }
@@ -178,6 +180,23 @@ void Controller::heartbeatLoop() {
             rm_->countByState(TaskState::RUNNING),
             rm_->udpPortsUsed(), rm_->udpPortsFree(), uptime));
     }
+}
+
+void Controller::handleTempQuery(const TaskRequest& req) {
+    std::vector<MessageCodec::TempEntry> entries;
+    for (auto& dev_id : rm_->deviceIds()) {
+        MessageCodec::TempEntry e;
+        e.device_id = dev_id;
+        auto* dev = rm_->getDevice(dev_id);
+        if (!dev) continue;
+        e.online = dev->isOnline();
+        for (auto& s : dev->listTemperatures()) {
+            bool ok = !std::isnan(s.value_c);
+            e.sensors.push_back({s.name, s.value_c, ok});
+        }
+        entries.push_back(std::move(e));
+    }
+    amqp_->sendResponse(MessageCodec::encodeTempResponse(req.request_id, entries));
 }
 
 void Controller::sendReject(const std::string& req_id,

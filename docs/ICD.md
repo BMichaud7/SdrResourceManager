@@ -1,6 +1,6 @@
 # INTERFACE CONTROL DOCUMENT (ICD)
 ## SDR Radio Resource Task Manager
-### Document: SDR-RRTM-ICD-002  |  Version: 2.3  |  Status: Released
+### Document: SDR-RRTM-ICD-002  |  Version: 2.4  |  Status: Released
 
 ---
 
@@ -187,6 +187,7 @@ than any existing task on that device, the request is rejected with
 | `TASK_STOP`                | Stop a CONTINUOUS or SCAN task           |
 | `TASK_CANCEL`              | Cancel any non-terminal task             |
 | `HEALTH_QUERY`             | Request current resource status          |
+| `DEVICE_TEMP_QUERY`        | Request hardware temperatures from all devices |
 
 ### Controller → Client
 
@@ -198,6 +199,7 @@ than any existing task on that device, the request is rejected with
 | `DEVICE_HEALTH`         | health topic     | Per-device hardware metrics (periodic) |
 | `CONTROLLER_HEALTH`     | health topic     | Process-level metrics (periodic)     |
 | `HEALTH_QUERY_RESPONSE` | response queue   | Response to HEALTH_QUERY             |
+| `DEVICE_TEMP_RESPONSE`  | response queue   | Temperature readings (response to DEVICE_TEMP_QUERY) |
 
 ---
 
@@ -832,6 +834,66 @@ device state in a single message.
 }
 ```
 
+### 8.18 DEVICE_TEMP_QUERY
+
+Requests the current temperature of every online SDR device. The response
+arrives as `DEVICE_TEMP_RESPONSE` on the response queue. No task is created;
+the query is synchronous and typically completes within a few milliseconds.
+
+`rank`, `task_type`, and `rf` fields are **not** required.
+
+```json
+{
+  "msg_type":       "DEVICE_TEMP_QUERY",
+  "schema_version": "2.0",
+  "timestamp_ms":   1700000000000,
+  "request_id":     "fff00000-e29b-41d4-a716-446655440018"
+}
+```
+
+### 8.19 DEVICE_TEMP_RESPONSE
+
+Delivered to the response queue in reply to `DEVICE_TEMP_QUERY`. Reports every
+temperature sensor exposed by each device via the SoapySDR sensor API.
+
+```json
+{
+  "msg_type":       "DEVICE_TEMP_RESPONSE",
+  "schema_version": "2.0",
+  "timestamp_ms":   1700000000050,
+  "request_id":     "fff00000-e29b-41d4-a716-446655440018",
+  "devices": [
+    {
+      "device_id": "pluto-0",
+      "online":    true,
+      "sensors": [
+        { "name": "xadc_temp0",       "value_c": 47.86 },
+        { "name": "ad9361-phy_temp0", "value_c": 1.75  }
+      ]
+    },
+    {
+      "device_id": "pluto-1",
+      "online":    false,
+      "sensors":   []
+    }
+  ]
+}
+```
+
+**Field semantics**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `device_id` | string | Matches the `id` field in `devices.xml` |
+| `online` | boolean | `false` if the device failed to open or has gone offline |
+| `sensors` | array | Empty for offline devices |
+| `sensors[].name` | string | Driver-specific sensor name (e.g. `"xadc_temp0"`) |
+| `sensors[].value_c` | number \| null | Degrees Celsius; `null` if the read failed |
+
+The controller uses `SoapySDR::Device::listSensors()` filtered to names
+containing `"temp"`, falling back to reading `"temp0"` directly on drivers
+that do not implement `listSensors()`.
+
 ---
 
 ## 9. TASK LIFECYCLE
@@ -1353,7 +1415,39 @@ Both release resources immediately and publish a final `TASK_STATUS`.
 
 ---
 
-### 11.17 Health Query
+### 11.17 Device Temperature Query
+
+**Use-case**: a monitoring service polls temperatures every 30 seconds and records
+them to a time-series database (see `SdrTempLogger`).
+
+**Request → request queue**:
+```json
+{
+  "msg_type":   "DEVICE_TEMP_QUERY",
+  "request_id": "fff00001-e29b-41d4-a716-446655440018"
+}
+```
+
+**Response → response queue**:
+```json
+{
+  "msg_type":    "DEVICE_TEMP_RESPONSE",
+  "request_id":  "fff00001-e29b-41d4-a716-446655440018",
+  "timestamp_ms": 1700000000050,
+  "devices": [
+    {
+      "device_id": "pluto-0",
+      "online":    true,
+      "sensors": [
+        { "name": "xadc_temp0",       "value_c": 47.86 },
+        { "name": "ad9361-phy_temp0", "value_c": 1.75  }
+      ]
+    }
+  ]
+}
+```
+
+### 11.18 Health Query
 
 **Request →**
 ```json
@@ -1547,3 +1641,4 @@ TriggerMonitor reads SoapySDR stream continuously:
 | 2.1     | Add TASK_STATUS, DEVICE_HEALTH, CONTROLLER_HEALTH, HEALTH_QUERY_RESPONSE definitions; task lifecycle state machine; full scenarios section; `shared_lo` coherence mode; `coherency_group` cross-board DF |
 | 2.2     | **`rank` field required** on all `TASK_REQUEST_*` messages; rank-based preemption (§4.2); `terminal_reason` and `rank` fields added to `TASK_STATUS`; `priority` field added to `TASK_STATUS` |
 | 2.3     | **Combined-window retune** (§4.3): `shared_lo=true` devices now expand their RF window to cover nearby tasks instead of rejecting with `RETUNE_CONFLICT`; **single-channel IQ multicast**: both tasks share one physical channel and receive independent wideband UDP streams; `slice_offset_hz` can change mid-stream and is updated via `TASK_STATUS`; `IQ_FLAG_DWELL_CHANGE` now fires on combined-window retuning as well as scan dwells |
+| 2.4     | **`DEVICE_TEMP_QUERY` / `DEVICE_TEMP_RESPONSE`** (§8.18–8.19): lightweight synchronous temperature poll; returns all sensors per device from `SoapySDR::listSensors()`. **`preferred_channel`** field added to `rf` block: pins a task to a specific physical antenna port; scheduler falls back to fan-out or DDC widening as needed. **Digital channelization**: DDC sub-band streaming upgrades existing tasks when hardware is widened for a second task. |

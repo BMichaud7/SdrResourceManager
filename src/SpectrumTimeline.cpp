@@ -10,7 +10,8 @@ FitResult SpectrumTimeline::canFit(
     int rx_count, int tx_count,
     int max_rx, int max_tx,
     double guard_hz,
-    bool shared_lo) const
+    bool shared_lo,
+    int  preferred_channel) const
 {
     std::lock_guard lock(mu_);
     FitResult res;
@@ -47,7 +48,18 @@ FitResult SpectrumTimeline::canFit(
             return res;
         }
         std::vector<int> arx, atx;
-        for (int i=0;i<max_rx&&(int)arx.size()<rx_count;++i) if(!rx_used[static_cast<size_t>(i)]) arx.push_back(i);
+        if (preferred_channel >= 0 && rx_count == 1) {
+            // Independent-LO: preferred channel must be free (no sharing)
+            if (preferred_channel >= max_rx || rx_used[static_cast<size_t>(preferred_channel)]) {
+                res.reject_code   = RejectCode::CHANNEL_COUNT_EXCEEDED;
+                res.reject_reason = "preferred_channel " + std::to_string(preferred_channel)
+                                  + (preferred_channel >= max_rx ? " out of range" : " already in use");
+                return res;
+            }
+            arx.push_back(preferred_channel);
+        } else {
+            for (int i=0;i<max_rx&&(int)arx.size()<rx_count;++i) if(!rx_used[static_cast<size_t>(i)]) arx.push_back(i);
+        }
         for (int i=0;i<max_tx&&(int)atx.size()<tx_count;++i) if(!tx_used[static_cast<size_t>(i)]) atx.push_back(i);
         res.ok          = true;
         res.device_cf   = cf_hz;
@@ -149,20 +161,33 @@ FitResult SpectrumTimeline::canFit(
         for (int c : s->rx_channels) if(c<max_rx) rx_used[static_cast<size_t>(c)]=true;
         for (int c : s->tx_channels) if(c<max_tx) tx_used[static_cast<size_t>(c)]=true;
     }
-    if (used_rx + rx_count > max_rx) {
-        res.reject_code = RejectCode::CHANNEL_COUNT_EXCEEDED;
-        res.reject_reason = "RX " + std::to_string(used_rx) + "+" + std::to_string(rx_count) + ">" + std::to_string(max_rx);
-        return res;
+    // Channel assignment — preferred_channel overrides the normal count-then-pick logic.
+    // On shared-LO devices the requested channel is allowed to already be in use:
+    // activateTask detects it in channel_states_ and subscribes to the live IQStreamer
+    // (fan-out or DDC) rather than opening new hardware.
+    std::vector<int> arx, atx;
+    if (preferred_channel >= 0 && rx_count == 1) {
+        if (preferred_channel >= max_rx) {
+            res.reject_code   = RejectCode::CHANNEL_COUNT_EXCEEDED;
+            res.reject_reason = "preferred_channel " + std::to_string(preferred_channel) + " out of range";
+            return res;
+        }
+        // Shared-LO: allow reuse — skip count guard
+        arx.push_back(preferred_channel);
+    } else {
+        if (used_rx + rx_count > max_rx) {
+            res.reject_code = RejectCode::CHANNEL_COUNT_EXCEEDED;
+            res.reject_reason = "RX " + std::to_string(used_rx) + "+" + std::to_string(rx_count) + ">" + std::to_string(max_rx);
+            return res;
+        }
+        for (int i=0; i<max_rx && (int)arx.size()<rx_count; ++i)
+            if (!rx_used[static_cast<size_t>(i)]) arx.push_back(i);
     }
     if (used_tx + tx_count > max_tx) {
         res.reject_code = RejectCode::CHANNEL_COUNT_EXCEEDED;
         res.reject_reason = "TX " + std::to_string(used_tx) + "+" + std::to_string(tx_count) + ">" + std::to_string(max_tx);
         return res;
     }
-
-    std::vector<int> arx, atx;
-    for (int i=0; i<max_rx && (int)arx.size()<rx_count; ++i)
-        if (!rx_used[static_cast<size_t>(i)]) arx.push_back(i);
     for (int i=0; i<max_tx && (int)atx.size()<tx_count; ++i)
         if (!tx_used[static_cast<size_t>(i)]) atx.push_back(i);
 

@@ -85,8 +85,8 @@ private:
     // Shared across tasks that multicast from the same physical channel.
     // Guarded by rt_mu_.
     struct ChannelState {
-        RadioDevice*       device       = nullptr;
-        SoapySDR::Stream*  soapy_stream = nullptr;
+        RadioDevice*               device       = nullptr;
+        SoapySDR::Stream*          soapy_stream = nullptr;
         std::shared_ptr<IQStreamer> streamer;
     };
     std::unordered_map<std::string, ChannelState> channel_states_; // key="dev_id:ch"
@@ -103,6 +103,8 @@ private:
         // Held during hardware open; released in deactivateTask after stream close.
         // Prevents concurrent activations from racing on the same device.
         std::unique_lock<std::mutex>             hw_lock;
+        // True when this task subscribes via DDC sub-band (not raw addDest).
+        bool                                     is_subband_consumer = false;
     };
     mutable std::mutex                              rt_mu_;
     std::unordered_map<std::string, TaskRuntime>    runtimes_;
@@ -127,7 +129,8 @@ private:
         findBestDevice(double cf, double bw, double sr,
                        int rx_count, int tx_count,
                        int64_t t_start, int64_t t_stop,
-                       const std::string& preferred) const;
+                       const std::string& preferred,
+                       int preferred_channel = -1) const;
 
     void activateTask(const std::string& task_id);
     void deactivateTask(const std::string& task_id, TaskState terminal_state,

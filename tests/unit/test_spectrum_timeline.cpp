@@ -349,3 +349,61 @@ TEST(SpectrumTimeline, AllocatedBwExcludesExpiredSlots) {
     EXPECT_NEAR(tl.allocatedBw(500),  4e6, 1.0);
     EXPECT_DOUBLE_EQ(tl.allocatedBw(1000), 0.0);  // slot ends at t=1000 (exclusive)
 }
+
+// ── preferred_channel tests ───────────────────────────────────────────────────
+
+TEST(SpectrumTimeline, PreferredChannel_FreeChannelAssigned) {
+    // Device has channels 0 and 1; request preferred_channel=1 on empty timeline.
+    SpectrumTimeline tl;
+    auto r = tl.canFit(0, 60'000, CF, BW, SR, 1, 0, MRX, MTX, G,
+                       /*shared_lo=*/true, /*preferred_channel=*/1);
+    ASSERT_TRUE(r.ok);
+    EXPECT_EQ(r.avail_rx, (std::vector<int>{1}));
+}
+
+TEST(SpectrumTimeline, PreferredChannel_SharedLo_ReuseOccupiedChannel) {
+    // Channel 0 is in use at same CF/SR.  preferred_channel=0 should still succeed
+    // so activateTask can subscribe to the existing stream (fan-out / DDC).
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("existing", 0, TIME_INFINITE, CF, SR,
+                       CF - BW/2, CF + BW/2, {0}));
+    auto r = tl.canFit(0, TIME_INFINITE, CF, BW/4, SR, 1, 0, MRX, MTX, G,
+                       true, /*preferred_channel=*/0);
+    ASSERT_TRUE(r.ok) << r.reject_reason;
+    EXPECT_EQ(r.avail_rx, (std::vector<int>{0}));
+}
+
+TEST(SpectrumTimeline, PreferredChannel_IndepLo_OccupiedChannelRejected) {
+    // Independent-LO device: occupied preferred channel must fail.
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("existing", 0, TIME_INFINITE, CF, SR,
+                       CF - BW/2, CF + BW/2, {0}));
+    auto r = tl.canFit(0, TIME_INFINITE, CF, BW, SR, 1, 0, MRX, MTX, G,
+                       /*shared_lo=*/false, /*preferred_channel=*/0);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.reject_code, RejectCode::CHANNEL_COUNT_EXCEEDED);
+}
+
+TEST(SpectrumTimeline, PreferredChannel_OutOfRange_Rejected) {
+    SpectrumTimeline tl;
+    auto r = tl.canFit(0, 60'000, CF, BW, SR, 1, 0, MRX, MTX, G,
+                       true, /*preferred_channel=*/99);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.reject_code, RejectCode::CHANNEL_COUNT_EXCEEDED);
+}
+
+TEST(SpectrumTimeline, PreferredChannel_SharedLo_SameCf_SecondSlice) {
+    // Channel 0 occupied at same CF; a second task at same CF with preferred_channel=0
+    // and a different (adjacent) BW should also be admitted by canFit (shared reuse).
+    SpectrumTimeline tl;
+    tl.insert(makeSlot("existing", 0, TIME_INFINITE, CF, SR,
+                       CF - BW/2, CF + BW/2, {0}));
+    // Second slice at same CF, smaller BW — canFit allows reuse of ch0
+    auto r = tl.canFit(0, TIME_INFINITE, CF, BW/4, SR, 1, 0, MRX, MTX, G,
+                       /*shared_lo=*/true, /*preferred_channel=*/0);
+    ASSERT_TRUE(r.ok) << r.reject_reason;
+    EXPECT_EQ(r.avail_rx, (std::vector<int>{0}));
+    // Device CF/SR must be unchanged
+    EXPECT_DOUBLE_EQ(r.device_cf,   CF);
+    EXPECT_DOUBLE_EQ(r.device_rate, SR);
+}

@@ -46,6 +46,7 @@ private:
     void handleTaskCancel(const TaskRequest& req);
     void handleHealthQuery(const TaskRequest& req);
     void handleSnapshotRequest(const TaskRequest& req);
+    void handleTempQuery(const TaskRequest& req);
 
     void sendReject(const std::string& req_id, const std::string& corr_id,
                     RejectCode code, const std::string& reason);

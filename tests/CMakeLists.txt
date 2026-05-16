@@ -38,6 +38,8 @@ add_executable(sdr_tests
     unit/test_udp_port_pool.cpp
     unit/test_resource_manager.cpp
     unit/test_iq_streamer.cpp
+    unit/test_ddc.cpp
+    unit/test_channelization.cpp
     unit/test_fft_engine.cpp
     unit/test_scan_executor.cpp
     unit/test_trigger_monitor.cpp

@@ -426,3 +426,93 @@ TEST(MessageCodec, DecodeScanWithScanParamsKey) {
     ASSERT_EQ(req->scan_params->entries.size(), 1u);
     EXPECT_DOUBLE_EQ(req->scan_params->entries[0].center_freq_hz, 433.92e6);
 }
+
+// ── DEVICE_TEMP_QUERY / DEVICE_TEMP_RESPONSE tests ───────────────────────────
+
+TEST(MessageCodec, DecodeTempQuery) {
+    std::string body = json{
+        {"msg_type",    "DEVICE_TEMP_QUERY"},
+        {"request_id",  "req-temp-1"}
+    }.dump();
+    auto req = MessageCodec::decode(body);
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->msg_type,    "DEVICE_TEMP_QUERY");
+    EXPECT_EQ(req->request_id,  "req-temp-1");
+}
+
+TEST(MessageCodec, EncodeTempResponse_AllValid) {
+    std::vector<MessageCodec::TempEntry> devs;
+    MessageCodec::TempEntry e;
+    e.device_id = "pluto-0";
+    e.online    = true;
+    e.sensors.push_back({"temp0", 43.25, true});
+    devs.push_back(std::move(e));
+
+    auto body = MessageCodec::encodeTempResponse("req-temp-1", devs);
+    auto j    = json::parse(body);
+
+    EXPECT_EQ(j["msg_type"],    "DEVICE_TEMP_RESPONSE");
+    EXPECT_EQ(j["request_id"],  "req-temp-1");
+    ASSERT_EQ(j["devices"].size(), 1u);
+    auto& dev = j["devices"][0];
+    EXPECT_EQ(dev["device_id"], "pluto-0");
+    EXPECT_TRUE(dev["online"].get<bool>());
+    ASSERT_EQ(dev["sensors"].size(), 1u);
+    EXPECT_EQ(dev["sensors"][0]["name"],    "temp0");
+    EXPECT_NEAR(dev["sensors"][0]["value_c"].get<double>(), 43.25, 0.01);
+}
+
+TEST(MessageCodec, EncodeTempResponse_OfflineDevice) {
+    std::vector<MessageCodec::TempEntry> devs;
+    MessageCodec::TempEntry e;
+    e.device_id = "pluto-1";
+    e.online    = false;
+    // No sensors for offline device
+    devs.push_back(std::move(e));
+
+    auto body = MessageCodec::encodeTempResponse("req-temp-2", devs);
+    auto j    = json::parse(body);
+
+    ASSERT_EQ(j["devices"].size(), 1u);
+    EXPECT_FALSE(j["devices"][0]["online"].get<bool>());
+    EXPECT_TRUE(j["devices"][0]["sensors"].empty());
+}
+
+TEST(MessageCodec, EncodeTempResponse_FailedSensor_NullValue) {
+    std::vector<MessageCodec::TempEntry> devs;
+    MessageCodec::TempEntry e;
+    e.device_id = "pluto-0";
+    e.online    = true;
+    e.sensors.push_back({"temp0", 0.0, false}); // valid=false → null in JSON
+    devs.push_back(std::move(e));
+
+    auto body = MessageCodec::encodeTempResponse("req-temp-3", devs);
+    auto j    = json::parse(body);
+
+    auto& sensor = j["devices"][0]["sensors"][0];
+    EXPECT_EQ(sensor["name"], "temp0");
+    EXPECT_TRUE(sensor["value_c"].is_null()) << "Failed sensor must encode as null";
+}
+
+TEST(MessageCodec, EncodeTempResponse_MultipleDevicesAndSensors) {
+    std::vector<MessageCodec::TempEntry> devs;
+    {
+        MessageCodec::TempEntry e;
+        e.device_id = "dev-0"; e.online = true;
+        e.sensors.push_back({"temp0", 38.0, true});
+        e.sensors.push_back({"temp1", 52.1, true});
+        devs.push_back(std::move(e));
+    }
+    {
+        MessageCodec::TempEntry e;
+        e.device_id = "dev-1"; e.online = true;
+        e.sensors.push_back({"temp0", 41.7, true});
+        devs.push_back(std::move(e));
+    }
+
+    auto j = json::parse(MessageCodec::encodeTempResponse("req-multi", devs));
+    ASSERT_EQ(j["devices"].size(), 2u);
+    EXPECT_EQ(j["devices"][0]["sensors"].size(), 2u);
+    EXPECT_EQ(j["devices"][1]["sensors"].size(), 1u);
+    EXPECT_NEAR(j["devices"][0]["sensors"][1]["value_c"].get<double>(), 52.1, 0.01);
+}

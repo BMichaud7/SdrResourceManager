@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
 #include "ResourceManager.hpp"
 #include "sdr/Types.hpp"
+#include "sdr/MessageCodec.hpp"
 #include "FakeSoapyControl.hpp"
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <chrono>
+#include <cmath>
 #include <thread>
 
 using namespace sdr;
@@ -1188,6 +1192,98 @@ TEST(ResourceManager, CombinedWindow_RejectedWhenSpanExceedsDeviceMax) {
     rm.stopTask(r1.task_id, "s1", "done");
 }
 
+// ── preferred_channel tests ───────────────────────────────────────────────────
+
+TEST(ResourceManager, PreferredChannel_AssignsSpecificChannel) {
+    // On a 2-channel device, preferred_channel=1 must assign ch1, not ch0.
+    FakeSoapy::reset();
+    auto cfg = makeTestConfig();
+    cfg.devices[0].shared_lo = false; // independent LO so each ch is free
+    ResourceManager rm(cfg, [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto req = makeContinuous("req-1", 100e6, 200e3, 1e6, 1);
+    req.rf.preferred_channel = 1;
+    auto resp = rm.tryAccept(req);
+    ASSERT_TRUE(resp.accepted) << resp.reject_reason;
+    ASSERT_EQ(resp.streams.size(), 1u);
+    EXPECT_EQ(resp.streams[0].channel_index, 1) << "Should have got ch1";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    rm.stopTask(resp.task_id, "s1", "done");
+    EXPECT_EQ(rm.udpPortsUsed(), 0);
+}
+
+TEST(ResourceManager, PreferredChannel_OccupiedChannelRejected_IndepLo) {
+    // Independent-LO device: ch0 already in use → preferred_channel=0 rejected.
+    FakeSoapy::reset();
+    auto cfg = makeTestConfig();
+    cfg.devices[0].shared_lo = false;
+    ResourceManager rm(cfg, [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto r1 = rm.tryAccept(makeContinuous("req-1", 100e6, 200e3, 1e6, 1));
+    ASSERT_TRUE(r1.accepted);
+    ASSERT_EQ(r1.streams[0].channel_index, 0);
+
+    // Request ch0 again — must fail because ch0 is exclusively owned
+    auto req2 = makeContinuous("req-2", 100e6, 200e3, 1e6, 1);
+    req2.rf.preferred_channel = 0;
+    auto r2 = rm.tryAccept(req2);
+    EXPECT_FALSE(r2.accepted);
+
+    rm.stopTask(r1.task_id, "s1", "done");
+}
+
+TEST(ResourceManager, PreferredChannel_SharedLo_SameFreq_Fanout) {
+    // shared_lo device: ch0 occupied at same CF → preferred_channel=0 subscribes
+    // to the existing stream (fan-out, no new hardware channel opened).
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto r1 = rm.tryAccept(makeContinuous("req-1", 100e6, 100e3, 1e6, 1));
+    ASSERT_TRUE(r1.accepted);
+    EXPECT_EQ(r1.streams[0].channel_index, 0);
+
+    auto req2 = makeContinuous("req-2", 100e6, 100e3, 1e6, 1);
+    req2.rf.preferred_channel = 0;
+    auto r2 = rm.tryAccept(req2);
+    ASSERT_TRUE(r2.accepted) << r2.reject_reason;
+    // Both tasks on the same physical channel (shared stream)
+    EXPECT_EQ(r2.streams[0].channel_index, r1.streams[0].channel_index);
+    EXPECT_EQ(r2.streams[0].device_id,     r1.streams[0].device_id);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    rm.stopTask(r1.task_id, "s1", "done");
+    rm.stopTask(r2.task_id, "s2", "done");
+    EXPECT_EQ(rm.udpPortsUsed(), 0);
+}
+
+TEST(ResourceManager, PreferredChannel_SharedLo_DifferentFreq_Widens) {
+    // shared_lo device: ch0 at 100 MHz, new task at 101 MHz with preferred_channel=0
+    // → tryRetuneCombined must widen to cover both (same path as normal DDC).
+    FakeSoapy::reset();
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    auto r1 = rm.tryAccept(makeContinuous("req-1", 100e6, 100e3, 1e6, 1));
+    ASSERT_TRUE(r1.accepted);
+
+    auto req2 = makeContinuous("req-2", 101e6, 100e3, 1e6, 1);
+    req2.rf.preferred_channel = 0;
+    auto r2 = rm.tryAccept(req2);
+    ASSERT_TRUE(r2.accepted) << r2.reject_reason;
+    // Both tasks must land on the same physical channel (ch0 widened)
+    EXPECT_EQ(r2.streams[0].device_id,     r1.streams[0].device_id);
+    EXPECT_EQ(r2.streams[0].channel_index, 0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    rm.stopTask(r1.task_id, "s1", "done");
+    rm.stopTask(r2.task_id, "s2", "done");
+    EXPECT_EQ(rm.udpPortsUsed(), 0);
+}
+
 TEST(ResourceManager, CombinedWindow_StreamerKeptAliveWhenPrimaryStopsFirst) {
     // Task 1 stops while Task 2 is still running.
     // The shared IQStreamer must keep running until Task 2 also stops.
@@ -1210,4 +1306,382 @@ TEST(ResourceManager, CombinedWindow_StreamerKeptAliveWhenPrimaryStopsFirst) {
     rm.stopTask(r2.task_id, "s2", "done");
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 0);
     EXPECT_EQ(rm.udpPortsUsed(), 0);
+}
+
+// ── Temperature query tests ───────────────────────────────────────────────────
+
+TEST(ResourceManager, TempQuery_ReturnsAllDeviceTemps) {
+    FakeSoapy::reset();
+    FakeSoapy::reported_temp.store(47.3);
+
+    ResourceManager rm(makeTestConfig(10, 2), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices();
+
+    // Both fake devices should report temperature via listTemperatures()
+    auto ids = rm.deviceIds();
+    ASSERT_EQ(ids.size(), 2u);
+
+    for (auto& id : ids) {
+        auto* dev = rm.getDevice(id);
+        ASSERT_NE(dev, nullptr);
+        EXPECT_TRUE(dev->isOnline());
+        auto temps = dev->listTemperatures();
+        ASSERT_FALSE(temps.empty()) << "Device " << id << " returned no sensors";
+        EXPECT_EQ(temps[0].name, "temp0");
+        EXPECT_NEAR(temps[0].value_c, 47.3, 0.1);
+    }
+}
+
+TEST(ResourceManager, TempQuery_OfflineDevice_EmptySensors) {
+    FakeSoapy::reset();
+    FakeSoapy::fail_open.store(true);
+
+    ResourceManager rm(makeTestConfig(), [](const TaskRecord&){}, [](const auto&, const auto&){});
+    rm.openDevices(); // will fail
+
+    auto* dev = rm.getDevice("fake-0");
+    ASSERT_NE(dev, nullptr);
+    EXPECT_FALSE(dev->isOnline());
+    auto temps = dev->listTemperatures();
+    EXPECT_TRUE(temps.empty()) << "Offline device must return no sensors";
+}
+
+// ── PlutoSDR hardware tests (require ADALM-PLUTO connected via USB) ───────────
+
+static AppConfig makePlutoSdrConfig() {
+    // Enumerate first to get the exact URI — needed because the PlutoSDR libiio
+    // driver can't open with an empty URI when Avahi isn't running (no DNS-SD).
+    std::string uri;
+    try {
+        auto found = SoapySDR::Device::enumerate("driver=plutosdr");
+        if (!found.empty() && found[0].count("uri"))
+            uri = found[0].at("uri");
+    } catch (...) {}
+
+    AppConfig cfg;
+    cfg.policy = hwTestPolicy();
+    DeviceConfig dc;
+    dc.id                  = "pluto-0";
+    dc.driver              = "plutosdr";
+    dc.uri                 = uri;         // concrete URI from enumerate; empty = skip
+    dc.label               = "ADALM-PLUTO";
+    dc.streaming_source_ip = "127.0.0.1";
+    dc.coherency_group     = "";
+    dc.shared_lo           = true;
+    dc.caps.rx_channels         = 1;
+    dc.caps.tx_channels         = 1;
+    dc.caps.freq_min_hz         = 325e6;
+    dc.caps.freq_max_hz         = 3.8e9;
+    dc.caps.bandwidth_max_hz    = 20e6;
+    dc.caps.sample_rate_max_sps = 61.44e6;
+    dc.caps.rx_gain_min_db      = -3;
+    dc.caps.rx_gain_max_db      = 71;
+    dc.caps.tx_atten_min_db     = 0;
+    dc.caps.tx_atten_max_db     = 89;
+    cfg.devices.push_back(dc);
+    return cfg;
+}
+
+TEST(PlutoSdr, TemperatureSensorsReadable) {
+    // Requires ADALM-PLUTO connected via USB.
+    // The PlutoSDR exposes two temperature sensors:
+    //   xadc_temp0       — Zynq FPGA die temperature
+    //   ad9361-phy_temp0 — AD9361 RF transceiver temperature
+    FakeSoapy::reset();
+    auto cfg = makePlutoSdrConfig();
+    if (cfg.devices[0].uri.empty()) GTEST_SKIP() << "No PlutoSDR found";
+    ResourceManager rm(cfg, [](const TaskRecord&){}, [](const auto&, const auto&){});
+    int opened = rm.openDevices();
+    if (opened == 0) GTEST_SKIP() << "PlutoSDR found but failed to open";
+
+    auto* dev = rm.getDevice("pluto-0");
+    ASSERT_NE(dev, nullptr);
+    ASSERT_TRUE(dev->isOnline());
+
+    auto temps = dev->listTemperatures();
+    ASSERT_FALSE(temps.empty()) << "PlutoSDR must expose at least one temperature sensor";
+
+    bool found_valid = false;
+    for (auto& s : temps) {
+        spdlog::info("PlutoSDR sensor: {} = {:.2f} C", s.name, s.value_c);
+        EXPECT_FALSE(std::isnan(s.value_c)) << "Sensor " << s.name << " returned NaN";
+        if (!std::isnan(s.value_c) && s.value_c > -40.0 && s.value_c < 150.0)
+            found_valid = true;
+    }
+    EXPECT_TRUE(found_valid) << "No sensor returned a plausible temperature (−40–150 °C)";
+}
+
+TEST(PlutoSdr, TempResponseEncodesHardwareValues) {
+    // Reads real hardware temperatures and verifies they round-trip through the
+    // MessageCodec encode/decode path correctly.
+    FakeSoapy::reset();
+    auto cfg2 = makePlutoSdrConfig();
+    if (cfg2.devices[0].uri.empty()) GTEST_SKIP() << "No PlutoSDR found";
+    ResourceManager rm(cfg2, [](const TaskRecord&){}, [](const auto&, const auto&){});
+    if (rm.openDevices() == 0) GTEST_SKIP() << "PlutoSDR found but failed to open";
+
+    auto* dev = rm.getDevice("pluto-0");
+    auto hw_temps = dev->listTemperatures();
+    ASSERT_FALSE(hw_temps.empty());
+
+    // Build TempEntry and encode
+    MessageCodec::TempEntry entry;
+    entry.device_id = "pluto-0";
+    entry.online    = true;
+    for (auto& s : hw_temps)
+        entry.sensors.push_back({s.name, s.value_c, !std::isnan(s.value_c)});
+
+    auto body = MessageCodec::encodeTempResponse("req-hw-1", {entry});
+    auto j    = nlohmann::json::parse(body);
+
+    EXPECT_EQ(j["msg_type"], "DEVICE_TEMP_RESPONSE");
+    ASSERT_EQ(j["devices"].size(), 1u);
+    EXPECT_EQ(j["devices"][0]["device_id"], "pluto-0");
+    EXPECT_TRUE(j["devices"][0]["online"].get<bool>());
+    EXPECT_GE(j["devices"][0]["sensors"].size(), 1u);
+
+    // First valid sensor must have a plausible temperature in JSON
+    for (auto& s : j["devices"][0]["sensors"]) {
+        if (!s["value_c"].is_null()) {
+            double v = s["value_c"].get<double>();
+            EXPECT_GT(v, -40.0) << "Suspiciously cold: " << s["name"];
+            EXPECT_LT(v, 150.0) << "Suspiciously hot: "  << s["name"];
+        }
+    }
+}
+
+TEST(PlutoSdr, StressTestTemperature60s) {
+    // Opens the PlutoSDR at 10 MSPS and reads samples continuously for 60 seconds
+    // while polling temperature every 5 seconds.
+    // Verifies temperature stays within safe limits and reports a trend line.
+    FakeSoapy::reset();
+    auto cfg = makePlutoSdrConfig();
+    if (cfg.devices[0].uri.empty()) GTEST_SKIP() << "No PlutoSDR found";
+
+    ResourceManager rm(cfg, [](const TaskRecord&){}, [](const auto&, const auto&){});
+    if (rm.openDevices() == 0)    GTEST_SKIP() << "PlutoSDR found but failed to open";
+
+    auto* dev = rm.getDevice("pluto-0");
+    ASSERT_NE(dev, nullptr);
+    ASSERT_TRUE(dev->isOnline());
+
+    // Tune to 434 MHz, 10 MSPS — puts the ADC and LO synthesiser under load
+    const double CF_HZ = 434e6;
+    const double SR_SPS = 10e6;
+    ASSERT_TRUE(dev->tune(CF_HZ, SR_SPS)) << "Tune failed";
+
+    SoapySDR::Stream* stream = dev->openRxStream({0});
+    ASSERT_NE(stream, nullptr) << "openRxStream failed";
+    ASSERT_TRUE(dev->activateStream(stream)) << "activateStream failed";
+
+    // ── Read samples continuously in a background thread ─────────────────
+    std::atomic<bool>     running{true};
+    std::atomic<uint64_t> samples_read{0};
+
+    const int BUF_SAMPLES = 4096;
+    std::thread reader([&]() {
+        std::vector<float> buf(BUF_SAMPLES * 2);
+        void* bufs[1] = {buf.data()};
+        int   flags   = 0;
+        long long ts  = 0;
+        while (running.load(std::memory_order_relaxed)) {
+            int n = dev->readStream(stream, bufs, BUF_SAMPLES, flags, ts, 500'000LL);
+            if (n > 0) samples_read.fetch_add((uint64_t)n, std::memory_order_relaxed);
+        }
+    });
+
+    // ── Poll temperature every 5 seconds for 60 seconds ──────────────────
+    struct Sample { double elapsed_s; std::string name; double value_c; };
+    std::vector<Sample> trace;
+
+    auto t0 = std::chrono::steady_clock::now();
+    const double DURATION_S  = 60.0;
+    const double POLL_EVERY_S =  5.0;
+
+    double next_poll = 0.0;
+    while (true) {
+        double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (elapsed >= DURATION_S) break;
+
+        if (elapsed >= next_poll) {
+            for (auto& s : dev->listTemperatures()) {
+                trace.push_back({elapsed, s.name, s.value_c});
+            }
+            next_poll += POLL_EVERY_S;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // ── Stop ─────────────────────────────────────────────────────────────
+    running.store(false);
+    reader.join();
+    dev->deactivateStream(stream);
+    dev->closeStream(stream);
+
+    uint64_t total = samples_read.load();
+    double   msps  = total / 1e6 / DURATION_S;
+
+    // ── Report ───────────────────────────────────────────────────────────
+    std::printf("\n┌─ PlutoSDR stress test (%.0f s @ %.1f MHz, %.1f MSPS throughput) ─\n",
+                DURATION_S, CF_HZ / 1e6, msps);
+
+    // Print one column per sensor, rows = time
+    std::vector<std::string> sensor_names;
+    for (auto& s : trace) {
+        if (std::find(sensor_names.begin(), sensor_names.end(), s.name)
+                == sensor_names.end())
+            sensor_names.push_back(s.name);
+    }
+    // Header
+    std::printf("│ %6s", "t (s)");
+    for (auto& n : sensor_names) std::printf("  %22s", n.c_str());
+    std::printf("\n│ %6s", "------");
+    for (size_t i = 0; i < sensor_names.size(); ++i) std::printf("  %22s", "----------------------");
+    std::printf("\n");
+
+    // Rows — one per unique timestamp
+    double last_t = -1;
+    for (auto& s : trace) {
+        if (s.elapsed_s != last_t) {
+            if (last_t >= 0) std::printf("\n");
+            std::printf("│ %6.1f", s.elapsed_s);
+            last_t = s.elapsed_s;
+        }
+        if (!std::isnan(s.value_c))
+            std::printf("  %21.2f°C", s.value_c);
+        else
+            std::printf("  %22s", "(read error)");
+    }
+    std::printf("\n└───────────────────────────────────────────────────────────────\n");
+    std::printf("  Total samples read: %llu  (%.2f MSPS)\n",
+                (unsigned long long)total, msps);
+
+    // ── Assertions ───────────────────────────────────────────────────────
+    EXPECT_GT(trace.size(), 0u) << "No temperature samples collected";
+    for (auto& s : trace) {
+        if (!std::isnan(s.value_c)) {
+            EXPECT_LT(s.value_c, 95.0)
+                << s.name << " exceeded 95°C at t=" << s.elapsed_s << "s";
+        }
+    }
+    EXPECT_GT(msps, 1.0) << "Throughput too low (expected >1 MSPS)";
+}
+
+TEST(PlutoSdr, StressTestFullStackTemperature60s) {
+    // Full-stack stress: ResourceManager + two DDC sub-band consumers + mid-run retune,
+    // all at 10 MSPS for 60 seconds. Temperature polled every 5 s.
+    // Exercises: AD9361 RX, USB bus, Ddc (mixer+FIR+decimate) on CPU.
+    FakeSoapy::reset();
+    auto cfg = makePlutoSdrConfig();
+    if (cfg.devices[0].uri.empty()) GTEST_SKIP() << "No PlutoSDR found";
+
+    // Bind two UDP sinks to absorb the DDC output
+    auto bindUdp = []() -> std::pair<int,int> {
+        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY;
+        ::bind(fd, (sockaddr*)&a, sizeof(a));
+        socklen_t l = sizeof(a); ::getsockname(fd, (sockaddr*)&a, &l);
+        struct timeval tv{0,0}; ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        return {fd, (int)ntohs(a.sin_port)};
+    };
+    auto [fd0, port0] = bindUdp();
+    auto [fd1, port1] = bindUdp();
+
+    // Open device at 10 MSPS
+    ResourceManager rm(cfg, [](const TaskRecord&){}, [](const auto&, const auto&){});
+    ASSERT_GT(rm.openDevices(), 0);
+    auto* dev = rm.getDevice("pluto-0");
+    ASSERT_TRUE(dev->isOnline());
+    ASSERT_TRUE(dev->tune(434e6, 10e6));
+
+    SoapySDR::Stream* stream = dev->openRxStream({0});
+    ASSERT_NE(stream, nullptr);
+    ASSERT_TRUE(dev->activateStream(stream));
+
+    // Primary IQStreamer (wideband owner)
+    IQStreamer::Config sc;
+    sc.task_id = "stress-primary"; sc.stream_id = "sp"; sc.channel_index = 0;
+    sc.dest_ip = ""; sc.dest_port = 0;       // no raw dest — only sub-bands below
+    sc.packet_samples = 1024; sc.task_start_ms = 0; sc.sample_rate = 10e6;
+
+    auto streamer = std::make_shared<IQStreamer>(sc, dev->soapyDevice(), stream, nullptr);
+    streamer->updateCenterFreq(434e6);
+    streamer->updateSampleRate(10e6);
+
+    // Two DDC sub-bands: 434.0 MHz @ 500 kHz and 434.5 MHz @ 500 kHz (decim=20)
+    streamer->addSubBand("sb0","ss0",0,"127.0.0.1",port0, 434.0e6, 500e3, 10e6);
+    streamer->addSubBand("sb1","ss1",0,"127.0.0.1",port1, 434.5e6, 500e3, 10e6);
+    streamer->start();
+
+    // Drain UDP sockets in background so send buffers never fill
+    std::atomic<bool> running{true};
+    auto drain = [](int fd, std::atomic<bool>& run) {
+        char buf[65536];
+        while (run.load(std::memory_order_relaxed))
+            ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+    };
+    std::thread t0(drain, fd0, std::ref(running));
+    std::thread t1(drain, fd1, std::ref(running));
+
+    // Temperature poll loop — 60 s, sample every 5 s
+    struct TempSample { double t; std::string name; double c; };
+    std::vector<TempSample> trace;
+    auto t_start = std::chrono::steady_clock::now();
+    double next_poll = 0.0;
+
+    while (true) {
+        double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t_start).count();
+        if (elapsed >= 60.0) break;
+
+        if (elapsed >= next_poll) {
+            // Mid-run retune at 30 s to stress the PLL
+            if (next_poll >= 30.0 && next_poll < 35.0) {
+                dev->tune(868e6, 10e6);
+                streamer->pauseForRetune(8);
+                streamer->updateCenterFreq(868e6);
+            }
+            for (auto& s : dev->listTemperatures())
+                trace.push_back({elapsed, s.name, s.value_c});
+            next_poll += 5.0;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    // Teardown
+    running.store(false);
+    streamer->stop();
+    t0.join(); t1.join();
+    dev->deactivateStream(stream);
+    dev->closeStream(stream);
+    ::close(fd0); ::close(fd1);
+
+    // Print table
+    std::vector<std::string> names;
+    for (auto& s : trace)
+        if (std::find(names.begin(),names.end(),s.name)==names.end()) names.push_back(s.name);
+
+    std::printf("\n┌─ Full-stack stress (60 s | 10 MSPS | 2× DDC @ 500 kHz | retune @ 30 s) ─\n");
+    std::printf("│ %6s", "t (s)");
+    for (auto& n : names) std::printf("  %22s", n.c_str());
+    std::printf("\n│ %6s", "------");
+    for (size_t i = 0; i < names.size(); ++i) std::printf("  %22s", "----------------------");
+    std::printf("\n");
+
+    double last_t = -1;
+    for (auto& s : trace) {
+        if (s.t != last_t) {
+            if (last_t >= 0) std::printf("\n");
+            std::printf("│ %6.1f", s.t);
+            last_t = s.t;
+        }
+        std::printf("  %21.2f°C", s.c);
+    }
+    std::printf("\n└────────────────────────────────────────────────────────────────────────\n");
+
+    // Sanity checks
+    EXPECT_GT(trace.size(), 0u);
+    for (auto& s : trace)
+        EXPECT_LT(s.c, 95.0) << s.name << " hit " << s.c << "°C at t=" << s.t << "s";
 }

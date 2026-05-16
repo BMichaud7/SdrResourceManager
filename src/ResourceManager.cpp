@@ -86,7 +86,8 @@ std::optional<ResourceManager::DeviceCandidate>
 ResourceManager::findBestDevice(double cf, double bw, double sr,
                                  int rx, int tx,
                                  int64_t t_start, int64_t t_stop,
-                                 const std::string& preferred) const
+                                 const std::string& preferred,
+                                 int preferred_channel) const
 {
     // Sort devices: preferred first, then by free BW descending
     std::vector<std::string> ordered;
@@ -124,7 +125,8 @@ ResourceManager::findBestDevice(double cf, double bw, double sr,
             t_start, t_stop, cf, bw, sr, rx, tx,
             caps.rx_channels, caps.tx_channels,
             cfg_.policy.guard_band_hz,
-            dev->config().shared_lo);
+            dev->config().shared_lo,
+            preferred_channel);
 
         if (fit.ok)
             return DeviceCandidate{dev.get(), std::move(fit)};
@@ -348,17 +350,22 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
     }
 
     // ── Single-device path ───────────────────────────────────────────────────
+    const int pref_ch = req.rf.preferred_channel; // -1 = any; ≥0 = specific
     auto candidate = findBestDevice(
         req.rf.center_freq_hz, req.rf.bandwidth_hz, req.rf.sample_rate_sps,
-        req.rf.rx_count, req.rf.tx_count, t_start, t_stop, req.rf.preferred_device);
+        req.rf.rx_count, req.rf.tx_count, t_start, t_stop,
+        req.rf.preferred_device, pref_ch);
 
     if (!candidate && req.rank > 0 && tryPreemptConflicting(req, t_start, t_stop)) {
         candidate = findBestDevice(
             req.rf.center_freq_hz, req.rf.bandwidth_hz, req.rf.sample_rate_sps,
-            req.rf.rx_count, req.rf.tx_count, t_start, t_stop, req.rf.preferred_device);
+            req.rf.rx_count, req.rf.tx_count, t_start, t_stop,
+            req.rf.preferred_device, pref_ch);
     }
 
-    // Try expanding an existing shared-LO window to fit both tasks
+    // Try expanding an existing shared-LO window to fit both tasks.
+    // When preferred_channel is set, also runs for same-CF subscriptions (the
+    // same-CF guard is bypassed inside tryRetuneCombined for this case).
     if (!candidate)
         candidate = tryRetuneCombined(req, t_start, t_stop);
 
@@ -384,13 +391,17 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
 
     // Build allocation record
     TaskRecord::DeviceAllocation alloc;
-    alloc.device_id       = candidate->device->id();
-    alloc.rx_channels     = candidate->fit.avail_rx;
-    alloc.tx_channels     = candidate->fit.avail_tx;
-    alloc.center_freq_hz  = candidate->fit.device_cf;
-    alloc.sample_rate_sps = candidate->fit.device_rate;
-    alloc.slice_lo_hz     = candidate->fit.placed_lo;
-    alloc.slice_hi_hz     = candidate->fit.placed_hi;
+    alloc.device_id              = candidate->device->id();
+    alloc.rx_channels            = candidate->fit.avail_rx;
+    alloc.tx_channels            = candidate->fit.avail_tx;
+    alloc.center_freq_hz         = candidate->fit.device_cf;
+    alloc.sample_rate_sps        = candidate->fit.device_rate;
+    // Store the task's requested SR; activateTask uses it to decide whether DDC applies.
+    // Non-zero only when the device runs at a wider rate (combined-window path).
+    alloc.output_sample_rate_sps = (std::abs(candidate->fit.device_rate - req.rf.sample_rate_sps) > 1.0)
+                                   ? req.rf.sample_rate_sps : 0.0;
+    alloc.slice_lo_hz            = candidate->fit.placed_lo;
+    alloc.slice_hi_hz            = candidate->fit.placed_hi;
 
     // Insert timeline slot
     TimeFreqSlot slot;
@@ -766,19 +777,72 @@ ResourceManager::tryRetuneCombined(const TaskRequest& req,
         if (req.rf.bandwidth_hz > caps.bandwidth_max_hz) continue;
         if (req.rf.rx_count     > caps.rx_channels)     continue;
 
-        // Skip when the new CF matches the existing device window: canFit already
-        // attempted slice packing at the current CF and failed for other reasons
-        // (e.g. channel count). Only expand the window when CFs genuinely differ.
-        {
-            auto slots_cf = tl->slotsOverlapping(t_start, t_stop);
-            bool same_cf = !slots_cf.empty() &&
-                std::all_of(slots_cf.begin(), slots_cf.end(),
-                    [&](const TimeFreqSlot& s){
-                        return std::abs(s.center_freq_hz - req.rf.center_freq_hz) < 1.0;
-                    });
-            if (same_cf) continue;
+        // Determine whether the new CF matches the existing device window.
+        const int pref_ch = req.rf.preferred_channel;
+        auto slots_cf = tl->slotsOverlapping(t_start, t_stop);
+        bool same_cf = !slots_cf.empty() &&
+            std::all_of(slots_cf.begin(), slots_cf.end(),
+                [&](const TimeFreqSlot& s){
+                    return std::abs(s.center_freq_hz - req.rf.center_freq_hz) < 1.0;
+                });
+
+        // Normally skip when same CF — canFit already handles slice packing.
+        // Exception: preferred_channel is set AND the existing tasks use that
+        // channel at the same CF/SR.  In that case we take a direct "fan-out
+        // subscribe" path: the new task joins the existing stream without any
+        // hardware retune.
+        if (same_cf) {
+            if (pref_ch < 0) continue; // normal guard
+
+            // Same-CF fan-out fast path.
+            // Verify the requested channel exists in the overlapping slots.
+            bool ch_found = false;
+            for (auto& slot : slots_cf) {
+                if (std::find(slot.rx_channels.begin(), slot.rx_channels.end(), pref_ch)
+                        != slot.rx_channels.end()) {
+                    ch_found = true;
+                    break;
+                }
+            }
+            if (!ch_found) continue;
+
+            // Verify the new slice fits inside the existing hardware window.
+            double dev_cf = slots_cf[0].center_freq_hz;
+            double dev_sr = slots_cf[0].sample_rate_sps;
+            double win_lo = dev_cf - dev_sr / 2.0;
+            double win_hi = dev_cf + dev_sr / 2.0;
+            double req_lo = req.rf.center_freq_hz - req.rf.bandwidth_hz / 2.0;
+            double req_hi = req.rf.center_freq_hz + req.rf.bandwidth_hz / 2.0;
+            if (req_lo < win_lo || req_hi > win_hi) continue;
+
+            // Rank guard
+            {
+                bool rank_ok = true;
+                std::lock_guard lock(reg_mu_);
+                for (auto& slot : slots_cf) {
+                    auto it = registry_.find(slot.task_id);
+                    if (it == registry_.end()) continue;
+                    if (!isTerminalState(it->second.state) && req.rank < it->second.rank)
+                        { rank_ok = false; break; }
+                }
+                if (!rank_ok) continue;
+            }
+
+            spdlog::info("ResourceManager: same-CF subscribe on {} ch={} cf={:.3f}MHz "
+                         "sr={:.3f}MSPS (no hardware change)",
+                         dev_id, pref_ch, dev_cf / 1e6, dev_sr / 1e6);
+
+            FitResult fit;
+            fit.ok          = true;
+            fit.device_cf   = dev_cf;
+            fit.device_rate = dev_sr;
+            fit.placed_lo   = req_lo;
+            fit.placed_hi   = req_hi;
+            fit.avail_rx    = {pref_ch};
+            return DeviceCandidate{dev.get(), std::move(fit)};
         }
 
+        // Different-CF path: use canCombine to compute the widened window.
         auto cr = tl->canCombine(t_start, t_stop,
                                   req.rf.center_freq_hz, req.rf.bandwidth_hz,
                                   req.rf.rx_count, caps.rx_channels,
@@ -787,6 +851,18 @@ ResourceManager::tryRetuneCombined(const TaskRequest& req,
         if (!cr.ok) {
             spdlog::debug("tryRetuneCombined: {} not combinable: {}", dev_id, cr.reject_reason);
             continue;
+        }
+
+        // If a specific channel is required, verify the existing tasks use it and
+        // filter avail_rx to that channel only.
+        if (pref_ch >= 0) {
+            bool found = std::find(cr.avail_rx.begin(), cr.avail_rx.end(), pref_ch)
+                         != cr.avail_rx.end();
+            if (!found) {
+                spdlog::debug("tryRetuneCombined: {} has no preferred_channel={}", dev_id, pref_ch);
+                continue;
+            }
+            cr.avail_rx = {pref_ch};
         }
 
         // Rank guard: don't let a lower-rank task subscribe to a higher-rank stream
@@ -805,28 +881,135 @@ ResourceManager::tryRetuneCombined(const TaskRequest& req,
             if (!rank_ok) continue;
         }
 
-        // Retune device hardware to the combined window
-        if (!dev->tune(cr.combined_cf, cr.combined_sr)) {
-            spdlog::warn("tryRetuneCombined: tune failed on {}", dev_id);
-            continue;
+        // Check whether the hardware actually needs to change.
+        // When canCombine returns the same CF/SR as the current device (edge case
+        // where the combined window happens to match), we skip the retune and settle
+        // drain to avoid an unnecessary glitch on existing streams.
+        auto slots = tl->slotsOverlapping(t_start, t_stop);
+        const bool hw_changed = !slots.empty() &&
+            (std::abs(cr.combined_cf - slots[0].center_freq_hz) > 1.0 ||
+             std::abs(cr.combined_sr - slots[0].sample_rate_sps) > 1.0);
+
+        if (hw_changed) {
+            // Retune device hardware to the combined window
+            if (!dev->tune(cr.combined_cf, cr.combined_sr)) {
+                spdlog::warn("tryRetuneCombined: tune failed on {}", dev_id);
+                continue;
+            }
+
+            // Update timeline slots to reflect new device CF/SR
+            tl->updateDeviceTune(cr.combined_cf, cr.combined_sr);
+
+            // Pause all running streamers on this device for PLL settle,
+            // then push the new CF/SR into the packet headers
+            {
+                std::lock_guard lock(rt_mu_);
+                for (auto& slot : slots) {
+                    auto it = runtimes_.find(slot.task_id);
+                    if (it == runtimes_.end()) continue;
+                    for (auto& streamer : it->second.streamers) {
+                        streamer->pauseForRetune(settle);
+                        streamer->updateCenterFreq(cr.combined_cf);
+                        streamer->updateSampleRate(cr.combined_sr);
+                    }
+                }
+            }
         }
 
-        // Update timeline slots to reflect new device CF/SR
-        tl->updateDeviceTune(cr.combined_cf, cr.combined_sr);
-
-        // Pause all running streamers on this device for PLL settle,
-        // then push the new CF/SR into the packet headers
-        auto slots = tl->slotsOverlapping(t_start, t_stop);
+        // Upgrade existing raw fan-out consumers to DDC sub-bands.
+        // When the hardware widens to cover a new task, any task previously receiving
+        // the unfiltered stream must be converted so it continues to see only its own
+        // requested band — not the now-wider wideband capture.
+        //
+        // Step A: collect raw consumers (under rt_mu_)
+        struct UpgradeCand {
+            std::string                task_id;
+            std::shared_ptr<IQStreamer> streamer;
+        };
+        std::vector<UpgradeCand> upgrade_cands;
         {
-            std::lock_guard lock(rt_mu_);
+            std::lock_guard lk_rt(rt_mu_);
             for (auto& slot : slots) {
-                auto it = runtimes_.find(slot.task_id);
-                if (it == runtimes_.end()) continue;
-                for (auto& streamer : it->second.streamers) {
-                    streamer->pauseForRetune(settle);
-                    streamer->updateCenterFreq(cr.combined_cf);
-                    streamer->updateSampleRate(cr.combined_sr);
-                }
+                auto rt_it = runtimes_.find(slot.task_id);
+                if (rt_it == runtimes_.end()) continue;
+                auto& rt = rt_it->second;
+                if (rt.is_subband_consumer) continue; // already DDC — skip
+                if (rt.streamers.empty()) continue;
+                upgrade_cands.push_back({slot.task_id, rt.streamers[0]});
+            }
+        }
+
+        // Step B: build upgrade plans — read alloc data BEFORE the registry update
+        // below overwrites sample_rate_sps with cr.combined_sr.
+        struct UpgradePlan {
+            std::string                task_id;
+            std::string                stream_id;
+            std::string                dest_ip;
+            int                        dest_port;
+            int                        channel_index;
+            double                     task_cf;
+            double                     output_sr;
+            std::shared_ptr<IQStreamer> streamer;
+        };
+        std::vector<UpgradePlan> upgrade_plans;
+        {
+            std::lock_guard lk_reg(reg_mu_);
+            for (auto& cand : upgrade_cands) {
+                auto it = registry_.find(cand.task_id);
+                if (it == registry_.end()) continue;
+                auto& rec = it->second;
+                if (isTerminalState(rec.state)) continue;
+                if (rec.allocations.empty()) continue;
+                auto& alloc = rec.allocations[0];
+                if (alloc.device_id != dev_id) continue;
+                if (alloc.rx_channels.empty() || alloc.udp_ports.empty()) continue;
+
+                // Task's original requested SR (before the update below clobbers it)
+                double output_sr = alloc.output_sample_rate_sps > 0.0
+                                   ? alloc.output_sample_rate_sps : alloc.sample_rate_sps;
+                double task_cf   = (alloc.slice_lo_hz + alloc.slice_hi_hz) / 2.0;
+
+                double decim_f = cr.combined_sr / output_sr;
+                int    decim   = (int)std::round(decim_f);
+                if (decim < 2 || std::abs(decim_f - decim) / decim >= 1e-3) continue;
+
+                UpgradePlan plan;
+                plan.task_id      = cand.task_id;
+                plan.stream_id    = makeStreamId(cand.task_id, "RX",
+                                                 alloc.device_id, alloc.rx_channels[0]);
+                plan.dest_ip      = rec.streaming.dest_ip;
+                plan.dest_port    = alloc.udp_ports[0];
+                plan.channel_index= alloc.rx_channels[0];
+                plan.task_cf      = task_cf;
+                plan.output_sr    = output_sr;
+                plan.streamer     = cand.streamer;
+
+                // Record the output SR so deactivateTask and any future retune can find it
+                alloc.output_sample_rate_sps = output_sr;
+
+                upgrade_plans.push_back(std::move(plan));
+            }
+        }
+
+        // Step C: perform conversion — streamer methods are internally lock-safe
+        for (auto& plan : upgrade_plans) {
+            plan.streamer->removeDest(plan.task_id);
+            plan.streamer->addSubBand(
+                plan.task_id, plan.stream_id, plan.channel_index,
+                plan.dest_ip, plan.dest_port,
+                plan.task_cf, plan.output_sr, cr.combined_sr);
+            spdlog::info("tryRetuneCombined: upgraded task {} → DDC sub-band "
+                         "cf={:.3f}MHz sr={:.3f}MSPS",
+                         plan.task_id, plan.task_cf / 1e6, plan.output_sr / 1e6);
+        }
+
+        // Step D: update is_subband_consumer flags (under rt_mu_)
+        if (!upgrade_plans.empty()) {
+            std::lock_guard lk_rt(rt_mu_);
+            for (auto& plan : upgrade_plans) {
+                auto rt_it = runtimes_.find(plan.task_id);
+                if (rt_it != runtimes_.end())
+                    rt_it->second.is_subband_consumer = true;
             }
         }
 
@@ -849,8 +1032,9 @@ ResourceManager::tryRetuneCombined(const TaskRequest& req,
         for (auto& tid : to_notify)
             notifyStateChange(tid);
 
-        spdlog::info("ResourceManager: combined retune on {} → cf={:.3f}MHz sr={:.3f}MSPS "
+        spdlog::info("ResourceManager: combined {} on {} → cf={:.3f}MHz sr={:.3f}MSPS "
                      "(covering {} existing task(s))",
+                     hw_changed ? "retune" : "subscribe",
                      dev_id, cr.combined_cf / 1e6, cr.combined_sr / 1e6, (int)slots.size());
 
         FitResult fit;
@@ -980,18 +1164,53 @@ void ResourceManager::activateTask(const std::string& task_id) {
             }
 
             if (borrowed.size() == alloc.rx_channels.size()) {
-                // All channels shared — subscribe to live streamers (no hardware open)
-                for (int i = 0; i < (int)alloc.rx_channels.size(); ++i) {
-                    borrowed[i]->addDest(
-                        task_id,
-                        makeStreamId(task_id, "RX", alloc.device_id, alloc.rx_channels[i]),
-                        streaming.dest_ip,
-                        alloc.udp_ports[static_cast<size_t>(i)]);
-                    rt.streamers.push_back(borrowed[i]);
-                    rt.soapy_streams.push_back(borrowed_hw[i]); // ref for trigger monitor
+                // All channels shared — subscribe to the live streamer.
+                // If the task requested a narrower band (DDC path), apply DDC; otherwise
+                // fan-out the raw wideband stream via addDest.
+                // Read wideband SR directly from the IQStreamer's atomic — avoids
+                // adding cf/sr to ChannelState which would change struct size and timing.
+                double wideband_sr = borrowed.empty() ? 0.0 : borrowed[0]->currentSR();
+                double output_sr = alloc.output_sample_rate_sps > 0.0
+                                   ? alloc.output_sample_rate_sps : alloc.sample_rate_sps;
+                bool needs_ddc = false;
+                if (wideband_sr > 0.0 && std::abs(output_sr - wideband_sr) > 1.0) {
+                    double decim_f = wideband_sr / output_sr;
+                    int    decim   = (int)std::round(decim_f);
+                    // Only apply DDC when decimation ratio is an integer (within 0.1%).
+                    // Non-integer ratios fall back to raw wideband fan-out (addDest).
+                    needs_ddc = (decim >= 2 && std::abs(decim_f - decim) / decim < 1e-3);
                 }
-                spdlog::info("activateTask [{}] subscribed to shared channel(s) on {}",
-                             task_id, alloc.device_id);
+
+                if (needs_ddc && alloc.rx_channels.size() == 1) {
+                    // Sub-band DDC: mix + filter + decimate to task's requested band
+                    double task_cf = (alloc.slice_lo_hz + alloc.slice_hi_hz) / 2.0;
+                    borrowed[0]->addSubBand(
+                        task_id,
+                        makeStreamId(task_id, "RX", alloc.device_id, alloc.rx_channels[0]),
+                        alloc.rx_channels[0],
+                        streaming.dest_ip, alloc.udp_ports[0],
+                        task_cf, output_sr, wideband_sr);
+                    rt.streamers.push_back(borrowed[0]);
+                    rt.soapy_streams.push_back(borrowed_hw[0]);
+                    rt.is_subband_consumer = true;
+                    spdlog::info("activateTask [{}] DDC sub-band on {} cf={:.3f}MHz sr={:.3f}MSPS"
+                                 " (wideband {:.3f}MSPS)",
+                                 task_id, alloc.device_id,
+                                 task_cf / 1e6, output_sr / 1e6, wideband_sr / 1e6);
+                } else {
+                    // Raw fan-out: same CF/SR, or multi-channel (no DDC)
+                    for (int i = 0; i < (int)alloc.rx_channels.size(); ++i) {
+                        borrowed[i]->addDest(
+                            task_id,
+                            makeStreamId(task_id, "RX", alloc.device_id, alloc.rx_channels[i]),
+                            streaming.dest_ip,
+                            alloc.udp_ports[static_cast<size_t>(i)]);
+                        rt.streamers.push_back(borrowed[i]);
+                        rt.soapy_streams.push_back(borrowed_hw[i]);
+                    }
+                    spdlog::info("activateTask [{}] subscribed to shared channel(s) on {}",
+                                 task_id, alloc.device_id);
+                }
             } else {
                 // New channel(s) — tune device, open stream, create IQStreamer(s)
                 if (!dev->tune(alloc.center_freq_hz, alloc.sample_rate_sps)) {
@@ -1012,22 +1231,32 @@ void ResourceManager::activateTask(const std::string& task_id) {
                 }
                 rt.soapy_streams.push_back({dev, s});
 
-                for (int i=0; i<(int)alloc.rx_channels.size(); ++i) {
-                    IQStreamer::Config sc;
-                    sc.task_id       = task_id;
-                    sc.stream_id     = makeStreamId(task_id,"RX",alloc.device_id,alloc.rx_channels[i]);
-                    sc.channel_index = alloc.rx_channels[i];
-                    sc.dest_ip       = streaming.dest_ip;
-                    sc.dest_port     = alloc.udp_ports[static_cast<size_t>(i)];
-                    sc.packet_samples= cfg_.policy.iq_packet_samples;
-                    sc.task_start_ms = rec.start_time_ms;
-                    sc.sample_rate   = alloc.sample_rate_sps;
-                    auto streamer = std::make_shared<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
-                    streamer->updateCenterFreq(alloc.center_freq_hz);
-                    streamer->start();
-                    rt.streamers.push_back(streamer);
-
-                    std::string key = alloc.device_id + ":" + std::to_string(alloc.rx_channels[i]);
+                // ONE IQStreamer owns the SoapySDR stream and reads all channels.
+                // Extra channels are demuxed inside workerLoop — avoids concurrent
+                // readStream calls from multiple threads on the same stream object.
+                IQStreamer::Config sc;
+                sc.task_id       = task_id;
+                sc.stream_id     = makeStreamId(task_id,"RX",alloc.device_id,alloc.rx_channels[0]);
+                sc.channel_index = alloc.rx_channels[0];
+                sc.dest_ip       = streaming.dest_ip;
+                sc.dest_port     = alloc.udp_ports[0];
+                sc.packet_samples= cfg_.policy.iq_packet_samples;
+                sc.task_start_ms = rec.start_time_ms;
+                sc.sample_rate   = alloc.sample_rate_sps;
+                for (int i=1; i<(int)alloc.rx_channels.size(); ++i) {
+                    IQStreamer::ChannelDest ec;
+                    ec.channel_index = alloc.rx_channels[i];
+                    ec.stream_id     = makeStreamId(task_id,"RX",alloc.device_id,alloc.rx_channels[i]);
+                    ec.dest_ip       = streaming.dest_ip;
+                    ec.dest_port     = alloc.udp_ports[static_cast<size_t>(i)];
+                    sc.extra_channels.push_back(ec);
+                }
+                auto streamer = std::make_shared<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
+                streamer->updateCenterFreq(alloc.center_freq_hz);
+                streamer->start();
+                rt.streamers.push_back(streamer);
+                for (int ch : alloc.rx_channels) {
+                    std::string key = alloc.device_id + ":" + std::to_string(ch);
                     std::lock_guard lk(rt_mu_);
                     channel_states_[key] = {dev, s, streamer};
                 }
@@ -1115,6 +1344,10 @@ void ResourceManager::activateTask(const std::string& task_id) {
     // after closing the stream (not before IQStreamer is stopped).
     rt.hw_lock = std::move(hw_lock);
 
+    // Transfer the hw_lock into the runtime so deactivateTask releases it
+    // after closing the stream (not before IQStreamer is stopped).
+    rt.hw_lock = std::move(hw_lock);
+
     {
         std::lock_guard lock(rt_mu_);
         runtimes_[task_id] = std::move(rt);
@@ -1166,17 +1399,21 @@ void ResourceManager::deactivateTask(const std::string& task_id,
             scan_exec_to_stop = std::move(rt.scan_exec);
             trig_mon_to_stop  = std::move(rt.trig_mon);
 
-            // Remove this task's UDP dest from each shared streamer.
-            // Stop the streamer and close the SoapySDR stream only when
-            // the last subscriber's dest is removed.
-            for (auto& streamer : rt.streamers)
-                streamer->removeDest(task_id);
+            // Remove this task's subscription from each streamer.
+            // Sub-band consumers registered via addSubBand; raw fan-out via addDest.
+            for (auto& streamer : rt.streamers) {
+                if (rt.is_subband_consumer)
+                    streamer->removeSubBand(task_id);
+                else
+                    streamer->removeDest(task_id);
+            }
 
+            // Close the SoapySDR stream only when the last consumer (dest or sub-band) is gone.
             for (auto& [d, s] : rt.soapy_streams) {
                 bool should_close = false;
                 for (auto cs = channel_states_.begin(); cs != channel_states_.end(); ) {
                     if (cs->second.soapy_stream == s) {
-                        if (cs->second.streamer->destCount() == 0) {
+                        if (cs->second.streamer->totalConsumers() == 0) {
                             cs->second.streamer->stop();
                             should_close = true;
                             cs = channel_states_.erase(cs);

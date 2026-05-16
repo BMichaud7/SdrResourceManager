@@ -41,7 +41,16 @@ public:
     int   readStream(SoapySDR::Stream* s, void** buffs, size_t numElems,
                      int& flags, long long& timeNs, long timeoutUs = 500'000LL);
 
+    // Single legacy read — kept for internal use by getStatus().
     double getTemperature() const;
+
+    // Enumerate every temperature sensor the device exposes.
+    // Uses SoapySDR::Device::listSensors() filtered to names containing "temp".
+    // Falls back to reading "temp0" directly if listSensors() is not supported.
+    // value_c = NaN for sensors that fail to read.
+    struct TempSensor { std::string name; double value_c = 0.0; };
+    std::vector<TempSensor> listTemperatures() const;
+
     double currentCF()   const;
     double currentRate() const;
 
