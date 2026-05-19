@@ -46,8 +46,14 @@ void ScanExecutor::loop() {
                 if (s && s->isRunning()) s->updateCenterFreq(e.center_freq_hz);
             spdlog::debug("ScanExecutor [{}] step {} cf={:.3f}MHz dwell={}ms", task_id_, i+1, e.center_freq_hz/1e6, e.dwell_ms);
             auto dl = steady_clock::now() + milliseconds(e.dwell_ms);
-            while (running_.load() && steady_clock::now()<dl)
-                std::this_thread::sleep_for(milliseconds(50));
+            while (running_.load()) {
+                auto now = steady_clock::now();
+                if (now >= dl) break;
+                // Sleep until the deadline or 10ms before it (to stay responsive
+                // to stop() without burning CPU on a busy-wait).
+                auto wake = dl - milliseconds(10);
+                if (wake > now) std::this_thread::sleep_until(wake);
+            }
         }
         if (!params_.repeat) go=false;
     }

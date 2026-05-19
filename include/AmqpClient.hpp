@@ -20,7 +20,8 @@ class work_queue;
 
 namespace sdr {
 
-using MessageHandler = std::function<void(const std::string& body)>;
+// reply_to is the address from the request's reply_to property (may be empty).
+using MessageHandler = std::function<void(const std::string& body, const std::string& reply_to)>;
 
 class AmqpClient {
 public:
@@ -33,7 +34,10 @@ public:
     void start();
     void stop();
 
-    void sendResponse(const std::string& json_body);
+    // If reply_to is non-empty, route to that address; otherwise use the
+    // configured response_queue (backwards-compatible fallback).
+    void sendResponse(const std::string& json_body,
+                      const std::string& reply_to = "");
     void sendStatus(const std::string& json_body);
     void sendHealth(const std::string& json_body);
 

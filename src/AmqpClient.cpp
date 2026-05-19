@@ -69,8 +69,9 @@ public:
 
     void on_message(proton::delivery&, proton::message& msg) override {
         try {
-            std::string body = proton::get<std::string>(msg.body());
-            parent_.on_message_(body);
+            std::string body     = proton::get<std::string>(msg.body());
+            std::string reply_to = msg.reply_to();   // empty if not set
+            parent_.on_message_(body, reply_to);
         } catch (const std::exception& ex) {
             spdlog::error("AmqpClient: on_message error: {}", ex.what());
         }
@@ -143,12 +144,22 @@ void AmqpClient::stop() {
     spdlog::info("AmqpClient: stopped");
 }
 
-void AmqpClient::sendResponse(const std::string& body) {
+void AmqpClient::sendResponse(const std::string& body, const std::string& reply_to) {
     if (!connected_) { spdlog::warn("AmqpClient: sendResponse while disconnected"); return; }
-    // sendResponse is always called from within on_message (proton thread),
-    // so calling sendOn directly is safe and avoids the ~15s schedule delay
-    // caused by the proton event loop's AMQP idle-timeout wake interval.
-    handler_->sendOn(handler_->response_sender_, body);
+    // sendResponse is called from within on_message (proton thread) — calling
+    // sendOn directly is safe and avoids the ~15s schedule idle-timeout delay.
+    if (reply_to.empty() || reply_to == cfg_.response_queue) {
+        handler_->sendOn(handler_->response_sender_, body);
+    } else {
+        // Route to the caller's own reply queue (AMQP request-reply pattern).
+        // Open a per-call sender; proton reuses the underlying link if the
+        // target address is the same across calls within one connection.
+        proton::sender_options sopts;
+        sopts.target(proton::target_options().capabilities({proton::symbol("queue")}));
+        proton::connection conn = handler_->response_sender_.connection();
+        proton::sender s = conn.open_sender(reply_to, sopts);
+        handler_->sendOn(s, body);
+    }
 }
 
 void AmqpClient::sendStatus(const std::string& body) {

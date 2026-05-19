@@ -63,10 +63,14 @@ bool RadioDevice::tune(double cf_hz, double sr_sps) {
     try {
         dev_->setFrequency(SOAPY_SDR_RX, 0, cf_hz);
         dev_->setFrequency(SOAPY_SDR_TX, 0, cf_hz);
-        dev_->setSampleRate(SOAPY_SDR_RX, 0, sr_sps);
-        dev_->setSampleRate(SOAPY_SDR_TX, 0, sr_sps);
-        current_cf_   = cf_hz;
-        current_rate_ = sr_sps;
+        // setSampleRate on the AD9361 triggers a full PLL recalibration even
+        // when the rate is unchanged — skip it if the rate didn't change.
+        if (std::abs(sr_sps - current_rate_) > 1.0) {
+            dev_->setSampleRate(SOAPY_SDR_RX, 0, sr_sps);
+            dev_->setSampleRate(SOAPY_SDR_TX, 0, sr_sps);
+            current_rate_ = sr_sps;
+        }
+        current_cf_ = cf_hz;
         spdlog::info("[{}] Tuned {:.3f}MHz {:.3f}MSPS", cfg_.id, cf_hz/1e6, sr_sps/1e6);
         return true;
     } catch (const std::exception& ex) {

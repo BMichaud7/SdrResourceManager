@@ -197,27 +197,27 @@ void IQStreamer::sendPacket(const float* samples, uint16_t n, uint64_t ts_ns, ui
     iov[1].iov_base = const_cast<float*>(samples);
     iov[1].iov_len  = (size_t)n * 2 * sizeof(float);
 
-    // Snapshot dest fds under lock, send outside lock
-    std::vector<int> fds;
+    // Send to all destinations under lock to avoid a per-packet heap allocation.
+    // MSG_DONTWAIT ensures a full send buffer never stalls the SDR worker thread.
+    int sends_ok = 0;
+    ssize_t bytes_sent = 0;
     {
         std::lock_guard lock(dests_mu_);
-        fds.reserve(dests_.size());
-        for (auto& d : dests_) if (d.fd >= 0) fds.push_back(d.fd);
-    }
-
-    ssize_t last_sent = 0;
-    for (int fd : fds) {
-        struct msghdr msg{};
-        msg.msg_iov    = iov;
-        msg.msg_iovlen = 2;
-        last_sent = ::sendmsg(fd, &msg, MSG_DONTWAIT);
+        for (auto& d : dests_) {
+            if (d.fd < 0) continue;
+            struct msghdr msg{};
+            msg.msg_iov    = iov;
+            msg.msg_iovlen = 2;
+            ssize_t r = ::sendmsg(d.fd, &msg, MSG_DONTWAIT);
+            if (r > 0) { ++sends_ok; bytes_sent = r; }
+        }
     }
 
     std::lock_guard lock(mu_);
-    if (last_sent > 0) {
+    if (sends_ok > 0) {
         ++metrics_.packets_sent;
         metrics_.samples_total += n;
-        metrics_.throughput_mbps = 0.9*metrics_.throughput_mbps + 0.1*(last_sent*8.0/1e6);
+        metrics_.throughput_mbps = 0.9*metrics_.throughput_mbps + 0.1*(bytes_sent*8.0/1e6);
     }
     if (flags & IQ_FLAG_OVERFLOW) ++metrics_.overflows;
 }

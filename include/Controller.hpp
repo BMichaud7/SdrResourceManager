@@ -35,18 +35,18 @@ private:
 
     std::chrono::steady_clock::time_point start_time_;
 
-    void onMessage(const std::string& body);
+    void onMessage(const std::string& body, const std::string& reply_to);
     void onTaskStateChanged(const TaskRecord& rec);
     void schedulerLoop();
     void watchdogLoop();
     void heartbeatLoop();
 
-    void handleTaskRequest(const TaskRequest& req);
-    void handleTaskStop(const TaskRequest& req);
-    void handleTaskCancel(const TaskRequest& req);
-    void handleHealthQuery(const TaskRequest& req);
-    void handleSnapshotRequest(const TaskRequest& req);
-    void handleTempQuery(const TaskRequest& req);
+    void handleTaskRequest(const TaskRequest& req, const std::string& reply_to);
+    void handleTaskStop(const TaskRequest& req,    const std::string& reply_to);
+    void handleTaskCancel(const TaskRequest& req,  const std::string& reply_to);
+    void handleHealthQuery(const TaskRequest& req, const std::string& reply_to);
+    void handleSnapshotRequest(const TaskRequest& req, const std::string& reply_to);
+    void handleTempQuery(const TaskRequest& req,   const std::string& reply_to);
 
     void sendReject(const std::string& req_id, const std::string& corr_id,
                     RejectCode code, const std::string& reason);

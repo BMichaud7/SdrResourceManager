@@ -375,12 +375,28 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
         return resp;
     }
 
-    // Port allocation
+    // Port allocation — honour client-provided ports (dest_ports[]) when present.
+    // A client that pre-binds its socket includes the bound port in dest_ports[]
+    // so the controller can stream to it immediately (eliminates the AMQP race).
     int n_ports = req.rf.rx_count + req.rf.tx_count;
-    auto ports = port_pool_->allocateN(n_ports);
-    if ((int)ports.size() < n_ports) {
-        resp.reject_code   = RejectCode::PORT_POOL_EXHAUSTED;
-        resp.reject_reason = "UDP port pool exhausted"; return resp;
+    std::vector<int> ports;
+    if (!req.streaming.dest_ports.empty()) {
+        ports = req.streaming.dest_ports;
+        // Pad with pool ports for any channels the client didn't cover.
+        while ((int)ports.size() < n_ports) {
+            auto extra = port_pool_->allocateN(1);
+            if (extra.empty()) {
+                resp.reject_code   = RejectCode::PORT_POOL_EXHAUSTED;
+                resp.reject_reason = "UDP port pool exhausted"; return resp;
+            }
+            ports.push_back(extra[0]);
+        }
+    } else {
+        ports = port_pool_->allocateN(n_ports);
+        if ((int)ports.size() < n_ports) {
+            resp.reject_code   = RejectCode::PORT_POOL_EXHAUSTED;
+            resp.reject_reason = "UDP port pool exhausted"; return resp;
+        }
     }
 
     std::string task_id = genUuid();
@@ -484,7 +500,7 @@ TaskResponse ResourceManager::doAcceptScan(const TaskRequest& req) {
         for (auto& e : req.scan_params->entries) {
             if (e.center_freq_hz < caps.freq_min || e.center_freq_hz > caps.freq_max ||
                 e.bandwidth_hz <= 0 || e.bandwidth_hz > caps.bw_max ||
-                e.sample_rate_sps <= 0 || e.dwell_ms < 100) {
+                e.sample_rate_sps <= 0 || e.dwell_ms < 5) {
                 resp.reject_code = RejectCode::SCAN_ENTRY_INVALID;
                 resp.reject_reason = "Invalid scan entry at step "+std::to_string(e.step);
                 return resp;
@@ -1339,10 +1355,6 @@ void ResourceManager::activateTask(const std::string& task_id) {
             alloc0.sample_rate_sps, trig_done);
         rt.trig_mon->start();
     }
-
-    // Transfer the hw_lock into the runtime so deactivateTask releases it
-    // after closing the stream (not before IQStreamer is stopped).
-    rt.hw_lock = std::move(hw_lock);
 
     // Transfer the hw_lock into the runtime so deactivateTask releases it
     // after closing the stream (not before IQStreamer is stopped).

@@ -20,7 +20,7 @@ Controller::Controller(const AppConfig& cfg)
 
     amqp_ = std::make_unique<AmqpClient>(
         cfg_.broker,
-        [this](const std::string& body) { onMessage(body); });
+        [this](const std::string& body, const std::string& reply_to) { onMessage(body, reply_to); });
 }
 
 Controller::~Controller() { stop(); }
@@ -56,7 +56,7 @@ void Controller::stop() {
 }
 
 // ── Message routing ──────────────────────────────────────────────────────
-void Controller::onMessage(const std::string& body) {
+void Controller::onMessage(const std::string& body, const std::string& reply_to) {
     auto req = MessageCodec::decode(body);
     if (!req) {
         spdlog::warn("Controller: failed to decode message");
@@ -65,34 +65,34 @@ void Controller::onMessage(const std::string& body) {
     spdlog::debug("Controller: received msg_type={} req_id={}",
                   req->msg_type, req->request_id);
 
-    if (req->msg_type=="TASK_STOP")                  return handleTaskStop(*req);
-    if (req->msg_type=="TASK_CANCEL")                return handleTaskCancel(*req);
-    if (req->msg_type=="HEALTH_QUERY")               return handleHealthQuery(*req);
-    if (req->msg_type=="DEVICE_TEMP_QUERY")          return handleTempQuery(*req);
-    if (req->msg_type=="TASK_REQUEST_SNAPSHOT")      return handleSnapshotRequest(*req);
-    return handleTaskRequest(*req);
+    if (req->msg_type=="TASK_STOP")                  return handleTaskStop(*req, reply_to);
+    if (req->msg_type=="TASK_CANCEL")                return handleTaskCancel(*req, reply_to);
+    if (req->msg_type=="HEALTH_QUERY")               return handleHealthQuery(*req, reply_to);
+    if (req->msg_type=="DEVICE_TEMP_QUERY")          return handleTempQuery(*req, reply_to);
+    if (req->msg_type=="TASK_REQUEST_SNAPSHOT")      return handleSnapshotRequest(*req, reply_to);
+    return handleTaskRequest(*req, reply_to);
 }
 
-void Controller::handleTaskRequest(const TaskRequest& req) {
+void Controller::handleTaskRequest(const TaskRequest& req, const std::string& reply_to) {
     if (req.task_type == TaskType::UNKNOWN) {
         sendReject(req.request_id, req.correlation_id,
                    RejectCode::INVALID_TASK_TYPE, "Unknown task_type"); return;
     }
     auto resp = rm_->tryAccept(req);
-    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp));
+    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
 }
 
-void Controller::handleTaskStop(const TaskRequest& req) {
+void Controller::handleTaskStop(const TaskRequest& req, const std::string& reply_to) {
     auto resp = rm_->stopTask(req.task_id, req.request_id, req.reason);
-    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp));
+    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
 }
 
-void Controller::handleTaskCancel(const TaskRequest& req) {
+void Controller::handleTaskCancel(const TaskRequest& req, const std::string& reply_to) {
     auto resp = rm_->cancelTask(req.task_id, req.request_id, req.reason);
-    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp));
+    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
 }
 
-void Controller::handleHealthQuery(const TaskRequest& req) {
+void Controller::handleHealthQuery(const TaskRequest& req, const std::string& reply_to) {
     auto devs = rm_->deviceSummaries();
     std::vector<MessageCodec::DevHealthEntry> entries;
     for (auto& d : devs) {
@@ -116,15 +116,12 @@ void Controller::handleHealthQuery(const TaskRequest& req) {
         rm_->countByState(TaskState::PENDING)+
         rm_->countByState(TaskState::RUNNING),
         rm_->udpPortsUsed(), rm_->udpPortsFree(), uptime);
-    amqp_->sendResponse(body);
+    amqp_->sendResponse(body, reply_to);
 }
 
-void Controller::handleSnapshotRequest(const TaskRequest& req) {
+void Controller::handleSnapshotRequest(const TaskRequest& req, const std::string& reply_to) {
     auto resp = rm_->tryAccept(req);
-    // For snapshot, encode as SNAPSHOT_RESULT (not TASK_RESPONSE)
-    // The SnapshotResult is embedded via a side channel through tryAccept return.
-    // In this implementation the snapshot is fully synchronous.
-    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp));
+    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
 }
 
 void Controller::onTaskStateChanged(const TaskRecord& rec) {
@@ -182,7 +179,7 @@ void Controller::heartbeatLoop() {
     }
 }
 
-void Controller::handleTempQuery(const TaskRequest& req) {
+void Controller::handleTempQuery(const TaskRequest& req, const std::string& reply_to) {
     std::vector<MessageCodec::TempEntry> entries;
     for (auto& dev_id : rm_->deviceIds()) {
         MessageCodec::TempEntry e;
@@ -196,7 +193,7 @@ void Controller::handleTempQuery(const TaskRequest& req) {
         }
         entries.push_back(std::move(e));
     }
-    amqp_->sendResponse(MessageCodec::encodeTempResponse(req.request_id, entries));
+    amqp_->sendResponse(MessageCodec::encodeTempResponse(req.request_id, entries), reply_to);
 }
 
 void Controller::sendReject(const std::string& req_id,
