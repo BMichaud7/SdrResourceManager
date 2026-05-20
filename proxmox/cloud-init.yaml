@@ -1,0 +1,74 @@
+#cloud-config
+# Proxmox cloud-init user-data for the SDR stack VM.
+# Applied by create-vm.sh — do NOT edit the Proxmox copy directly; edit this file
+# and re-run create-vm.sh or: cp cloud-init.yaml /var/lib/vz/snippets/sdr-node-user-data.yaml
+
+hostname: sdr-node
+manage_etc_hosts: true
+locale: en_US.UTF-8
+timezone: UTC
+
+# ── System user ───────────────────────────────────────────────────────────────
+users:
+  - name: sdr
+    gecos: SDR Stack Operator
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    # SSH key is injected by create-vm.sh from SSH_KEY_FILE.
+    # You can also add authorized_keys here:
+    # ssh_authorized_keys:
+    #   - ssh-ed25519 AAAA... your-key
+
+# ── Packages ──────────────────────────────────────────────────────────────────
+packages:
+  - curl
+  - git
+  - jq
+  - qemu-guest-agent   # enables Proxmox to query VM IP / graceful shutdown
+
+package_update: true
+package_upgrade: true
+
+# ── Auto-start qemu-guest-agent ───────────────────────────────────────────────
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+
+  # ── Clone SDR repos ──────────────────────────────────────────────────────────
+  - |
+    git clone --depth 1 https://github.com/BMichaud7/SdrResourceManager.git /opt/sdr/SdrResourceManager
+    git clone --depth 1 https://github.com/BMichaud7/AcquisitionApp.git      /opt/sdr/AcquisitionApp
+    git clone --depth 1 https://github.com/BMichaud7/AnalysisApp.git         /opt/sdr/AnalysisApp
+    git clone --depth 1 https://github.com/BMichaud7/SdrScripts.git          /opt/sdr/SdrScripts
+    chown -R sdr:sdr /opt/sdr
+
+  # ── Run bootstrap as the sdr user ─────────────────────────────────────────
+  # bootstrap.sh installs k3s and deploys the full SDR stack.
+  # Set SDR_DEVICE_IP, AMQP_PASSWORD, DB_PASSWORD before the VM boots
+  # — OR — SSH in after boot and run: sudo /opt/sdr/bootstrap.sh
+  - |
+    if [ -n "${SDR_DEVICE_IP:-}" ] && [ -n "${AMQP_PASSWORD:-}" ] && [ -n "${DB_PASSWORD:-}" ]; then
+      sudo -u sdr bash /opt/sdr/SdrResourceManager/proxmox/bootstrap.sh
+    else
+      echo "[cloud-init] Credentials not set — run bootstrap manually:"
+      echo "  ssh sdr@<vm-ip>"
+      echo "  export SDR_DEVICE_IP=<sdr-box-ip> AMQP_PASSWORD=<pw> DB_PASSWORD=<pw>"
+      echo "  bash /opt/sdr/SdrResourceManager/proxmox/bootstrap.sh"
+    fi
+
+# Write the environment file for manual runs
+write_files:
+  - path: /etc/sdr-stack.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      # SDR stack environment — edit before running bootstrap.sh
+      # SDR_DEVICE_IP=192.168.10.100   # IP of the SoapySDR remote (PlutoSDR host)
+      # AMQP_PASSWORD=change_me
+      # DB_PASSWORD=change_me
+
+final_message: |
+  SDR VM is ready.
+  If bootstrap.sh did not run automatically, SSH in and run:
+    source /etc/sdr-stack.env   # edit first
+    bash /opt/sdr/SdrResourceManager/proxmox/bootstrap.sh

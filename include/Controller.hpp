@@ -1,7 +1,21 @@
 #pragma once
-// ════════════════════════════════════════════════════════════════════════
-//  Controller.hpp  —  Top-level orchestrator
-// ════════════════════════════════════════════════════════════════════════
+/**
+ * @file Controller.hpp
+ * @brief Top-level orchestrator for the SDR Resource Manager.
+ *
+ * Controller owns the ResourceManager and AmqpClient.  It:
+ * - Starts the AMQP subscription loop (receives task requests).
+ * - Dispatches each message to the appropriate handler.
+ * - Runs the scheduler tick (starts SCHEDULED tasks on time) and watchdog
+ *   (expires tasks whose end time has passed) in background threads.
+ * - Publishes TASK_STATUS heartbeats on state changes.
+ *
+ * ## Lifecycle
+ * ```
+ * Controller ctrl(cfg);
+ * ctrl.run();   // blocks until stop() is called (e.g. SIGTERM handler)
+ * ```
+ */
 #include "ConfigParser.hpp"
 #include "ResourceManager.hpp"
 #include "AmqpClient.hpp"
@@ -13,14 +27,31 @@
 
 namespace sdr {
 
+/**
+ * @brief Top-level controller: AMQP dispatcher + scheduler + watchdog.
+ *
+ * Non-copyable.  Exactly one instance per process.
+ */
 class Controller {
 public:
+    /**
+     * @brief Construct the controller.
+     * @param cfg Fully populated application configuration from ConfigParser.
+     */
     explicit Controller(const AppConfig& cfg);
     ~Controller();
     Controller(const Controller&)=delete;
     Controller& operator=(const Controller&)=delete;
 
-    void run();     // blocks until stop() is called
+    /**
+     * @brief Open all devices, connect to AMQP, and run until stop().
+     *
+     * Blocks the calling thread.  Call stop() from a signal handler or
+     * another thread to exit.
+     */
+    void run();
+
+    /// @brief Signal run() to return.  Thread-safe.
     void stop();
 
 private:
@@ -29,9 +60,9 @@ private:
     std::unique_ptr<AmqpClient>      amqp_;
 
     std::atomic<bool>  running_{false};
-    std::thread        scheduler_thread_;
-    std::thread        watchdog_thread_;
-    std::thread        heartbeat_thread_;
+    std::thread        scheduler_thread_;  ///< Calls rm_->schedulerTick() periodically.
+    std::thread        watchdog_thread_;   ///< Calls rm_->watchdogTick() periodically.
+    std::thread        heartbeat_thread_;  ///< Publishes TASK_STATUS heartbeats.
 
     std::chrono::steady_clock::time_point start_time_;
 

@@ -687,73 +687,111 @@ and password you set during setup to watch queue depths and live messages.
 
 ## 12. Kubernetes Deployment
 
-### Step 1: Create the sdr-hardware namespace
+The full stack (PostgreSQL, Artemis broker, controller, AcquisitionApp,
+AnalysisApp, signal-logger) deploys with a single script from the
+SdrResourceManager repo:
 
 ```bash
+cd SdrResourceManager
+./k8s/deploy.sh            # prompts for AMQP + DB passwords
+./k8s/deploy.sh --dry-run  # preview manifests without applying
+
+# Non-interactive (CI/CD):
+AMQP_PASSWORD=s3cr3t DB_PASSWORD=s3cr3t ./k8s/deploy.sh
+```
+
+`deploy.sh` applies manifests in dependency order:
+
+| # | Manifest | What it creates |
+|---|----------|-----------------|
+| 1 | Namespace | `sdr-system` |
+| 2 | `k8s/secrets.yaml` | `sdr-credentials` Secret (AMQP + DB passwords) |
+| 3 | `k8s/postgres.yaml` | PostgreSQL 16 StatefulSet, 20 Gi PVC, schemas |
+| 4 | `k8s/deployment.yaml` | Artemis broker + sdr-controller Deployment |
+| 5 | `AcquisitionApp/deploy/k8s/deployment.yaml` | AcquisitionApp DaemonSet |
+| 6 | `AnalysisApp/deploy/k8s/deployment.yaml` | AnalysisApp Deployment |
+| 7 | `SdrScripts/deploy/k8s/deployment.yaml` | signal-logger Deployment |
+
+All sibling repos must be present under the same parent directory:
+
+```
+parent/
+├── SdrTaskApi/
+├── SdrResourceManager/   ← deploy.sh lives here
+├── AcquisitionApp/
+├── AnalysisApp/
+└── SdrScripts/
+```
+
+### Credential injection
+
+Credentials are stored once in the `sdr-credentials` Secret and injected
+everywhere via an initContainer that renders XML config templates at pod start.
+No passwords are embedded in ConfigMaps.
+
+```bash
+# secrets.yaml ships with CHANGE_ME placeholders.
+# deploy.sh patches them with the passwords you supply at the prompt,
+# or reads AMQP_PASSWORD / DB_PASSWORD env vars non-interactively.
+```
+
+The initContainer pattern (used by controller, AcquisitionApp, AnalysisApp):
+
+```
+initContainer (python:3.12-alpine)
+  → reads ConfigMap XML template (${AMQP_PASSWORD}, ${DB_PASSWORD} placeholders)
+  → substitutes values from sdr-credentials Secret env vars
+  → writes rendered XML to emptyDir volume
+main container
+  → mounts emptyDir and reads rendered XML
+```
+
+### Label SDR-attached nodes
+
+AcquisitionApp deploys as a DaemonSet — one pod per node with a USB PlutoSDR.
+Label each such node before deploying:
+
+```bash
+kubectl label node <node-name> sdr-usb=true
+```
+
+### Verify the stack
+
+```bash
+# All pods running
+kubectl get pods -n sdr-system
+
+# Controller logs
+kubectl logs -f deployment/sdr-controller -n sdr-system
+
+# Watch rollout
+kubectl rollout status deployment/sdr-controller -n sdr-system
+```
+
+### Manual apply (without deploy.sh)
+
+```bash
+# 1. Namespace
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: sdr-hardware
+  name: sdr-system
 EOF
-```
 
-### Step 2: Create ExternalName services pointing to your SDR nodes
+# 2. Credentials (edit CHANGE_ME values first)
+kubectl apply -f k8s/secrets.yaml
 
-Edit `k8s/deployment.yaml` to replace the `externalName` values with your
-actual SDR node IPs:
+# 3. PostgreSQL
+kubectl apply -f k8s/postgres.yaml
 
-```yaml
-# Board 0
-externalName: 192.168.10.100   # ← your actual IP
-
-# Board 1
-externalName: 192.168.10.101   # ← your actual IP
-```
-
-Then apply:
-```bash
-kubectl apply -f k8s/deployment.yaml
-```
-
-### Step 3: Create the ConfigMap from your devices.xml
-
-The ConfigMap is embedded in `k8s/deployment.yaml`. To update it from
-your local file:
-
-```bash
-kubectl create configmap sdr-config \
-    --from-file=devices.xml=config/devices.xml \
-    -n sdr-system \
-    --dry-run=client -o yaml | kubectl apply -f -
-```
-
-### Step 4: Push your Docker image
-
-```bash
-# Edit k8s/deployment.yaml:
-# image: ghcr.io/BMichaud7/sdr-controller:2.2.0
-
-docker build -t ghcr.io/BMichaud7/sdr-controller:2.2.0 .
-docker push ghcr.io/BMichaud7/sdr-controller:2.2.0
-```
-
-### Step 5: Deploy
-
-```bash
+# 4. Broker + controller
 kubectl apply -f k8s/deployment.yaml
 
-# Watch rollout
-kubectl rollout status deployment/sdr-controller -n sdr-system
-
-# Verify pod is running
-kubectl get pods -n sdr-system
-```
-
-### Step 6: Check logs
-
-```bash
-kubectl logs -f deployment/sdr-controller -n sdr-system
+# 5. DSP apps (sibling repos)
+kubectl apply -f ../AcquisitionApp/deploy/k8s/deployment.yaml
+kubectl apply -f ../AnalysisApp/deploy/k8s/deployment.yaml
+kubectl apply -f ../SdrScripts/deploy/k8s/deployment.yaml
 ```
 
 ### Why Recreate strategy?
@@ -771,11 +809,10 @@ closed, streams released) before the new pod starts. The 30-second
 ### How DSP pods interact
 
 DSP pods connect to the AMQP broker and send requests to `sdr.task.request`.
-They receive responses on `sdr.task.response` (using their own receiver)
-and status events from `sdr.status` (topic, fan-out).
+They receive responses on the dynamic reply-to address assigned by Artemis
+to their persistent connection. Status events fan out on `sdr.status` (topic).
 
-Example DSP pod service account permissions (RBAC not required — all
-communication is over AMQP, not Kubernetes API).
+RBAC is not required — all communication is over AMQP, not the Kubernetes API.
 
 ---
 
@@ -866,7 +903,7 @@ kubectl logs -f deployment/sdr-controller -n sdr-system
 ```bash
 # From inside a DSP pod or using the example client:
 kubectl run sdr-client --rm -it --restart=Never \
-    --image=ghcr.io/BMichaud7/sdr-controller:2.2.0 \
+    --image=ghcr.io/bmichaud7/sdr-controller:2.1.0 \
     --namespace=sdr-system \
     -- sdr_client amqp://activemq-service:5672 10.0.1.10
 ```

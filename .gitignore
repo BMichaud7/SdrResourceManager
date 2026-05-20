@@ -39,3 +39,7 @@ CLAUDE.md
 
 # Logs
 *.log
+
+# Generated docs
+docs/html/
+docs/master/

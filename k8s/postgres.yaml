@@ -6,7 +6,7 @@
 #
 #  Prerequisites:
 #    Create the password Secret before applying:
-#      kubectl create secret generic sdr-db-credentials \
+#      kubectl create secret generic sdr-credentials \
 #        -n sdr-system \
 #        --from-literal=username=sdr \
 #        --from-literal=password=<your-password>
@@ -16,9 +16,10 @@
 # ════════════════════════════════════════════════════════════════════════
 
 ---
-# ── ConfigMap: SQL schemas ─────────────────────────────────────────────
-# All three init.sql files are merged here and run once by the initContainer.
-# IF NOT EXISTS on every statement — safe to re-apply.
+# ── ConfigMap: SQL schema ──────────────────────────────────────────────
+# Single shared schema used by AcquisitionApp, AnalysisApp, and signal-logger.
+# Signal identity: (freq ±10 kHz, modulation, bandwidth ±50%)
+# Same freq + different modulation → separate row (different signal type).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -27,110 +28,83 @@ metadata:
   labels:
     app: postgres
 data:
-  01_acquisitionapp.sql: |
-    CREATE TABLE IF NOT EXISTS detections (
-        id              BIGSERIAL       PRIMARY KEY,
-        detected_at     TIMESTAMPTZ     NOT NULL,
-        center_freq_hz  BIGINT          NOT NULL,
-        bandwidth_hz    INTEGER         NOT NULL,
-        power_db        REAL            NOT NULL,
-        scanner_id      TEXT            NOT NULL,
-        channel         SMALLINT        NOT NULL
+  01_signals.sql: |
+    CREATE TABLE IF NOT EXISTS signals (
+        id              BIGSERIAL        PRIMARY KEY,
+        first_seen      TIMESTAMPTZ      NOT NULL DEFAULT now(),
+        last_seen       TIMESTAMPTZ      NOT NULL DEFAULT now(),
+        freq_hz         DOUBLE PRECISION NOT NULL,
+        freq_mhz        DOUBLE PRECISION NOT NULL,
+        bandwidth_hz    DOUBLE PRECISION,
+        power_db        REAL,
+        snr_db          REAL,
+        scanner_id      TEXT             NOT NULL DEFAULT '',
+        channel         SMALLINT         NOT NULL DEFAULT 0,
+        modulation      TEXT             NOT NULL DEFAULT '',
+        mod_class       TEXT             NOT NULL DEFAULT '',
+        is_ofdm         BOOLEAN          NOT NULL DEFAULT false,
+        is_burst        BOOLEAN          NOT NULL DEFAULT false,
+        is_fhss         BOOLEAN          NOT NULL DEFAULT false,
+        symbol_rate_sps DOUBLE PRECISION,
+        bit_rate_bps    DOUBLE PRECISION,
+        hypothesis      TEXT             NOT NULL DEFAULT '',
+        hyp_category    TEXT             NOT NULL DEFAULT '',
+        hyp_confidence  REAL                      DEFAULT 0,
+        classified      BOOLEAN          NOT NULL DEFAULT false,
+        rule_confidence REAL                      DEFAULT 0,
+        onnx_used       BOOLEAN          NOT NULL DEFAULT false,
+        onnx_confidence REAL                      DEFAULT 0,
+        fast_path       BOOLEAN          NOT NULL DEFAULT false,
+        reject_reason   TEXT             NOT NULL DEFAULT '',
+        hits            INTEGER          NOT NULL DEFAULT 1
     );
-    CREATE INDEX IF NOT EXISTS idx_detections_time    ON detections (detected_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_detections_freq    ON detections (center_freq_hz);
-    CREATE INDEX IF NOT EXISTS idx_detections_scanner ON detections (scanner_id, detected_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_signals_freq    ON signals (freq_hz);
+    CREATE INDEX IF NOT EXISTS idx_signals_time    ON signals (last_seen DESC);
+    CREATE INDEX IF NOT EXISTS idx_signals_mod     ON signals (modulation);
+    CREATE INDEX IF NOT EXISTS idx_signals_hyp     ON signals (hypothesis);
+    CREATE INDEX IF NOT EXISTS idx_signals_unclass ON signals (classified, last_seen DESC)
+        WHERE classified = false;
 
-    CREATE OR REPLACE VIEW recent_detections AS
-    SELECT detected_at,
-           round(center_freq_hz/1e6,3) AS freq_mhz,
-           round(bandwidth_hz/1e3,1)   AS bw_khz,
-           round(power_db::numeric,1)  AS power_db,
-           scanner_id, channel
-    FROM detections WHERE detected_at > now() - interval '60 seconds'
-    ORDER BY detected_at DESC;
+    DROP VIEW IF EXISTS recent_detections;
+    DROP VIEW IF EXISTS recent_classifications;
+    DROP VIEW IF EXISTS freq_activity;
+    DROP VIEW IF EXISTS freq_classification_summary;
+    DROP VIEW IF EXISTS classification_path_stats;
+    DROP VIEW IF EXISTS recent_signals;
+    CREATE OR REPLACE VIEW recent_signals AS
+    SELECT last_seen,
+           round((freq_hz/1e6)::numeric,3)         AS freq_mhz,
+           round((bandwidth_hz/1e3)::numeric,1)    AS bw_khz,
+           round(power_db::numeric,1)              AS power_db,
+           round(snr_db::numeric,1)                AS snr_db,
+           CASE WHEN modulation!='' THEN modulation ELSE '(unclassified)' END AS modulation,
+           hypothesis,
+           round(hyp_confidence::numeric,2)        AS hyp_conf,
+           hits, scanner_id
+    FROM signals WHERE last_seen > now() - interval '60 seconds'
+    ORDER BY last_seen DESC;
 
     CREATE OR REPLACE VIEW freq_activity AS
-    SELECT round(center_freq_hz/1e6,2) AS freq_mhz,
-           count(*)                     AS hit_count,
-           round(avg(power_db)::numeric,1) AS avg_power_db,
-           round(max(power_db)::numeric,1) AS peak_power_db,
-           min(detected_at) AS first_seen, max(detected_at) AS last_seen
-    FROM detections GROUP BY round(center_freq_hz/1e6,2) ORDER BY hit_count DESC;
-
-  02_analysisapp.sql: |
-    CREATE TABLE IF NOT EXISTS analysis_results (
-        id                  BIGSERIAL       PRIMARY KEY,
-        analyzed_at         TIMESTAMPTZ     NOT NULL DEFAULT now(),
-        detection_id        TEXT            NOT NULL,
-        scanner_id          TEXT            NOT NULL,
-        center_freq_hz      BIGINT          NOT NULL,
-        bandwidth_hz        INTEGER,
-        snr_db              REAL,
-        classified          BOOLEAN         NOT NULL DEFAULT false,
-        analog_modulation   TEXT,
-        digital_modulation  TEXT,
-        symbol_rate_sps     DOUBLE PRECISION,
-        bit_rate_bps        DOUBLE PRECISION,
-        is_ofdm             BOOLEAN         DEFAULT false,
-        is_fhss             BOOLEAN         DEFAULT false,
-        is_burst            BOOLEAN         DEFAULT false,
-        hypothesis_system   TEXT,
-        hypothesis_category TEXT,
-        hypothesis_conf     REAL,
-        rule_confidence     REAL,
-        onnx_used           BOOLEAN         DEFAULT false,
-        onnx_confidence     REAL,
-        fast_path           BOOLEAN         DEFAULT false,
-        reject_reason       TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_analysis_time ON analysis_results (analyzed_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_analysis_freq ON analysis_results (center_freq_hz);
-    CREATE INDEX IF NOT EXISTS idx_analysis_mod  ON analysis_results (digital_modulation, analog_modulation);
-    CREATE INDEX IF NOT EXISTS idx_analysis_hyp  ON analysis_results (hypothesis_system);
+    SELECT round((freq_hz/1e6)::numeric,3)         AS freq_mhz,
+           CASE WHEN modulation!='' THEN modulation ELSE '(unclassified)' END AS modulation,
+           round((bandwidth_hz/1e3)::numeric,1)    AS bw_khz,
+           round(power_db::numeric,1)              AS power_db,
+           round(snr_db::numeric,1)                AS snr_db,
+           hypothesis, hits, first_seen, last_seen
+    FROM signals ORDER BY last_seen DESC;
 
     CREATE OR REPLACE VIEW recent_classifications AS
-    SELECT analyzed_at,
-           round(center_freq_hz/1e6,3) AS freq_mhz,
-           round(bandwidth_hz/1e3,1)   AS bw_khz,
-           round(snr_db::numeric,1)    AS snr_db,
-           coalesce(digital_modulation, analog_modulation, 'UNKNOWN') AS modulation,
-           hypothesis_system,
-           round(hypothesis_conf::numeric,2) AS hyp_conf,
-           fast_path, scanner_id
-    FROM analysis_results
-    WHERE analyzed_at > now() - interval '60 seconds' AND classified = true
-    ORDER BY analyzed_at DESC;
-
-    CREATE OR REPLACE VIEW classification_path_stats AS
-    SELECT fast_path, count(*) AS total,
-           round(avg(onnx_confidence)::numeric,3) AS avg_onnx_conf,
-           count(*) FILTER (WHERE classified) AS classified_count,
-           round(100.0*count(*) FILTER (WHERE classified)/nullif(count(*),0),1) AS classified_pct
-    FROM analysis_results GROUP BY fast_path;
-
-  03_signal_logger.sql: |
-    CREATE TABLE IF NOT EXISTS signals (
-        id           BIGSERIAL       PRIMARY KEY,
-        first_seen   TIMESTAMPTZ     NOT NULL DEFAULT now(),
-        last_seen    TIMESTAMPTZ     NOT NULL DEFAULT now(),
-        timestamp_ms BIGINT          NOT NULL,
-        freq_hz      DOUBLE PRECISION NOT NULL,
-        freq_mhz     DOUBLE PRECISION NOT NULL,
-        bandwidth_hz DOUBLE PRECISION,
-        power_db     REAL,
-        snr_db       REAL,
-        modulation   TEXT            DEFAULT '',
-        mod_class    TEXT            DEFAULT '',
-        is_ofdm      BOOLEAN         DEFAULT false,
-        is_burst     BOOLEAN         DEFAULT false,
-        is_fhss      BOOLEAN         DEFAULT false,
-        hits         INTEGER         NOT NULL DEFAULT 1,
-        classified   BOOLEAN         NOT NULL DEFAULT false,
-        scanner_id   TEXT            DEFAULT ''
-    );
-    CREATE INDEX IF NOT EXISTS idx_signals_freq ON signals (freq_hz, timestamp_ms DESC);
-    CREATE INDEX IF NOT EXISTS idx_signals_time ON signals (timestamp_ms DESC);
+    SELECT last_seen,
+           round((freq_hz/1e6)::numeric,3)          AS freq_mhz,
+           round((bandwidth_hz/1e3)::numeric,1)     AS bw_khz,
+           round(snr_db::numeric,1)                 AS snr_db,
+           modulation, mod_class, hypothesis,
+           round(hyp_confidence::numeric,2)         AS hyp_conf,
+           round(rule_confidence::numeric,2)        AS rule_conf,
+           onnx_used, fast_path, hits, scanner_id
+    FROM signals
+    WHERE classified = true AND last_seen > now() - interval '60 seconds'
+    ORDER BY last_seen DESC;
 
 ---
 # ── StatefulSet ────────────────────────────────────────────────────────
@@ -174,15 +148,15 @@ spec:
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
-                  name: sdr-db-credentials
-                  key: username
+                  name: sdr-credentials
+                  key: db-username
             - name: POSTGRES_DB
               value: sdr_scanner
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: sdr-db-credentials
-                  key: password
+                  name: sdr-credentials
+                  key: db-password
           volumeMounts:
             - name: init-sql
               mountPath: /docker-entrypoint-initdb.d
@@ -197,13 +171,13 @@ spec:
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
-                  name: sdr-db-credentials
-                  key: username
+                  name: sdr-credentials
+                  key: db-username
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: sdr-db-credentials
-                  key: password
+                  name: sdr-credentials
+                  key: db-password
             - name: POSTGRES_DB
               value: sdr_scanner
             - name: PGDATA

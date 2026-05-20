@@ -1,0 +1,75 @@
+##############################################################################
+# Master Doxyfile — unified documentation for the entire SDR stack.
+#
+# Run from the SdrResourceManager directory:
+#   doxygen docs/Doxyfile.master
+#
+# Generates docs/html/index.html covering:
+#   SdrTaskApi, AcquisitionApp, AnalysisApp, SdrResourceManager, SdrScripts
+#
+# Assumes the sibling-repo layout:
+#   parent/
+#   ├── SdrTaskApi/
+#   ├── AcquisitionApp/
+#   ├── AnalysisApp/
+#   ├── SdrResourceManager/   ← run doxygen from here
+#   └── SdrScripts/
+##############################################################################
+
+PROJECT_NAME           = "SDR Stack"
+PROJECT_NUMBER         = "2.1"
+PROJECT_BRIEF          = "SdrTaskApi · AcquisitionApp · AnalysisApp · SdrResourceManager · SdrScripts"
+PROJECT_LOGO           =
+OUTPUT_DIRECTORY       = docs/master
+HTML_OUTPUT            = html
+HTML_TIMESTAMP         = NO
+
+# ── Input ─────────────────────────────────────────────────────────────────
+INPUT                  = \
+    ../SdrTaskApi/include \
+    ../SdrTaskApi/src \
+    ../AcquisitionApp/include \
+    ../AcquisitionApp/src \
+    ../AnalysisApp/include \
+    ../AnalysisApp/src \
+    include \
+    src \
+    ../SdrScripts
+
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.cpp *.h *.py
+EXCLUDE_PATTERNS       = */build/* */.git/* */tests/* */docs/*
+EXTENSION_MAPPING      = py=Python
+
+# ── Output ────────────────────────────────────────────────────────────────
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
+TREEVIEW_WIDTH         = 280
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+
+# ── Extraction ────────────────────────────────────────────────────────────
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+BUILTIN_STL_SUPPORT    = YES
+DISTRIBUTE_GROUP_DOC   = YES
+OPTIMIZE_OUTPUT_JAVA   = YES
+
+# ── Source browsing ───────────────────────────────────────────────────────
+SOURCE_BROWSER         = YES
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# ── Preprocessor ─────────────────────────────────────────────────────────
+PREDEFINED             = ANALYSIS_WITH_DB ANALYSIS_WITH_ONNX
+
+# ── Misc ──────────────────────────────────────────────────────────────────
+HAVE_DOT               = NO
+GENERATE_TODOLIST      = YES
+GENERATE_BUGLIST       = YES
+WARN_IF_UNDOCUMENTED   = NO
+QUIET                  = NO
+WARNINGS               = YES
