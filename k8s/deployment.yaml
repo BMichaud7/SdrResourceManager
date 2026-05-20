@@ -109,20 +109,9 @@ data:
     </sdr_controller>
 
 ---
-# ── Secret: AMQP credentials ──────────────────────────────────────────────
-# In production: replace with sealed-secrets or Vault injection.
-# Create with: kubectl create secret generic sdr-amqp-credentials \
-#   -n sdr-system --from-literal=username=sdr_ctrl \
-#   --from-literal=password=CHANGE_ME
-apiVersion: v1
-kind: Secret
-metadata:
-  name: sdr-amqp-credentials
-  namespace: sdr-system
-type: Opaque
-stringData:
-  username: sdr_ctrl
-  password: CHANGE_ME  # !! Set a real password before applying; never commit a real value
+# ── Credentials come from the shared sdr-credentials Secret ───────────────
+# Apply k8s/secrets.yaml first (or use kubectl create secret).
+# See k8s/secrets.yaml for instructions.
 
 ---
 # ── ActiveMQ Artemis StatefulSet ──────────────────────────────────────────
@@ -155,9 +144,15 @@ spec:
               name: console
           env:
             - name: ARTEMIS_USER
-              value: admin
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-credentials
+                  key: amqp-username
             - name: ARTEMIS_PASSWORD
-              value: admin_secret_change_me
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-credentials
+                  key: amqp-password
           volumeMounts:
             - name: data
               mountPath: /var/lib/artemis-instance
@@ -284,7 +279,7 @@ spec:
 
       containers:
         - name: sdr-controller
-          image: ghcr.io/YOUR_USERNAME/sdr-controller:2.1.0  # ← Replace YOUR_USERNAME with your GitHub username
+          image: ghcr.io/bmichaud7/sdr-controller:2.1.0
           imagePullPolicy: Always
 
           ports:
@@ -298,11 +293,20 @@ spec:
               value: /etc/sdr-controller/devices.xml
             - name: SDR_LOG_LEVEL
               value: info
-            # Pod IP for IQ stream source (used in ACCEPT responses)
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: AMQP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-credentials
+                  key: amqp-username
+            - name: AMQP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-credentials
+                  key: amqp-password
 
           volumeMounts:
             - name: sdr-config-volume

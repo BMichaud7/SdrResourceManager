@@ -1,0 +1,328 @@
+# ════════════════════════════════════════════════════════════════════════
+#  PostgreSQL 16 — Kubernetes / k3s StatefulSet
+#
+#  Shared database for AcquisitionApp (detections), AnalysisApp
+#  (analysis_results), and signal-logger (signals).
+#
+#  Prerequisites:
+#    Create the password Secret before applying:
+#      kubectl create secret generic sdr-db-credentials \
+#        -n sdr-system \
+#        --from-literal=username=sdr \
+#        --from-literal=password=<your-password>
+#
+#  Apply:
+#    kubectl apply -f k8s/postgres.yaml
+# ════════════════════════════════════════════════════════════════════════
+
+---
+# ── ConfigMap: SQL schemas ─────────────────────────────────────────────
+# All three init.sql files are merged here and run once by the initContainer.
+# IF NOT EXISTS on every statement — safe to re-apply.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: sdr-system
+  labels:
+    app: postgres
+data:
+  01_acquisitionapp.sql: |
+    CREATE TABLE IF NOT EXISTS detections (
+        id              BIGSERIAL       PRIMARY KEY,
+        detected_at     TIMESTAMPTZ     NOT NULL,
+        center_freq_hz  BIGINT          NOT NULL,
+        bandwidth_hz    INTEGER         NOT NULL,
+        power_db        REAL            NOT NULL,
+        scanner_id      TEXT            NOT NULL,
+        channel         SMALLINT        NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_detections_time    ON detections (detected_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_detections_freq    ON detections (center_freq_hz);
+    CREATE INDEX IF NOT EXISTS idx_detections_scanner ON detections (scanner_id, detected_at DESC);
+
+    CREATE OR REPLACE VIEW recent_detections AS
+    SELECT detected_at,
+           round(center_freq_hz/1e6,3) AS freq_mhz,
+           round(bandwidth_hz/1e3,1)   AS bw_khz,
+           round(power_db::numeric,1)  AS power_db,
+           scanner_id, channel
+    FROM detections WHERE detected_at > now() - interval '60 seconds'
+    ORDER BY detected_at DESC;
+
+    CREATE OR REPLACE VIEW freq_activity AS
+    SELECT round(center_freq_hz/1e6,2) AS freq_mhz,
+           count(*)                     AS hit_count,
+           round(avg(power_db)::numeric,1) AS avg_power_db,
+           round(max(power_db)::numeric,1) AS peak_power_db,
+           min(detected_at) AS first_seen, max(detected_at) AS last_seen
+    FROM detections GROUP BY round(center_freq_hz/1e6,2) ORDER BY hit_count DESC;
+
+  02_analysisapp.sql: |
+    CREATE TABLE IF NOT EXISTS analysis_results (
+        id                  BIGSERIAL       PRIMARY KEY,
+        analyzed_at         TIMESTAMPTZ     NOT NULL DEFAULT now(),
+        detection_id        TEXT            NOT NULL,
+        scanner_id          TEXT            NOT NULL,
+        center_freq_hz      BIGINT          NOT NULL,
+        bandwidth_hz        INTEGER,
+        snr_db              REAL,
+        classified          BOOLEAN         NOT NULL DEFAULT false,
+        analog_modulation   TEXT,
+        digital_modulation  TEXT,
+        symbol_rate_sps     DOUBLE PRECISION,
+        bit_rate_bps        DOUBLE PRECISION,
+        is_ofdm             BOOLEAN         DEFAULT false,
+        is_fhss             BOOLEAN         DEFAULT false,
+        is_burst            BOOLEAN         DEFAULT false,
+        hypothesis_system   TEXT,
+        hypothesis_category TEXT,
+        hypothesis_conf     REAL,
+        rule_confidence     REAL,
+        onnx_used           BOOLEAN         DEFAULT false,
+        onnx_confidence     REAL,
+        fast_path           BOOLEAN         DEFAULT false,
+        reject_reason       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_analysis_time ON analysis_results (analyzed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_analysis_freq ON analysis_results (center_freq_hz);
+    CREATE INDEX IF NOT EXISTS idx_analysis_mod  ON analysis_results (digital_modulation, analog_modulation);
+    CREATE INDEX IF NOT EXISTS idx_analysis_hyp  ON analysis_results (hypothesis_system);
+
+    CREATE OR REPLACE VIEW recent_classifications AS
+    SELECT analyzed_at,
+           round(center_freq_hz/1e6,3) AS freq_mhz,
+           round(bandwidth_hz/1e3,1)   AS bw_khz,
+           round(snr_db::numeric,1)    AS snr_db,
+           coalesce(digital_modulation, analog_modulation, 'UNKNOWN') AS modulation,
+           hypothesis_system,
+           round(hypothesis_conf::numeric,2) AS hyp_conf,
+           fast_path, scanner_id
+    FROM analysis_results
+    WHERE analyzed_at > now() - interval '60 seconds' AND classified = true
+    ORDER BY analyzed_at DESC;
+
+    CREATE OR REPLACE VIEW classification_path_stats AS
+    SELECT fast_path, count(*) AS total,
+           round(avg(onnx_confidence)::numeric,3) AS avg_onnx_conf,
+           count(*) FILTER (WHERE classified) AS classified_count,
+           round(100.0*count(*) FILTER (WHERE classified)/nullif(count(*),0),1) AS classified_pct
+    FROM analysis_results GROUP BY fast_path;
+
+  03_signal_logger.sql: |
+    CREATE TABLE IF NOT EXISTS signals (
+        id           BIGSERIAL       PRIMARY KEY,
+        first_seen   TIMESTAMPTZ     NOT NULL DEFAULT now(),
+        last_seen    TIMESTAMPTZ     NOT NULL DEFAULT now(),
+        timestamp_ms BIGINT          NOT NULL,
+        freq_hz      DOUBLE PRECISION NOT NULL,
+        freq_mhz     DOUBLE PRECISION NOT NULL,
+        bandwidth_hz DOUBLE PRECISION,
+        power_db     REAL,
+        snr_db       REAL,
+        modulation   TEXT            DEFAULT '',
+        mod_class    TEXT            DEFAULT '',
+        is_ofdm      BOOLEAN         DEFAULT false,
+        is_burst     BOOLEAN         DEFAULT false,
+        is_fhss      BOOLEAN         DEFAULT false,
+        hits         INTEGER         NOT NULL DEFAULT 1,
+        classified   BOOLEAN         NOT NULL DEFAULT false,
+        scanner_id   TEXT            DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_signals_freq ON signals (freq_hz, timestamp_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_signals_time ON signals (timestamp_ms DESC);
+
+---
+# ── StatefulSet ────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: sdr-system
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      # initContainer: apply schemas after postgres starts.
+      # Uses pg_isready to wait for readiness before executing SQL.
+      initContainers:
+        - name: init-schema
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -h localhost -U $POSTGRES_USER -d $POSTGRES_DB; do
+                echo "waiting for postgres…"; sleep 2
+              done
+              for f in /docker-entrypoint-initdb.d/*.sql; do
+                echo "applying $f"
+                psql -h localhost -U $POSTGRES_USER -d $POSTGRES_DB -f "$f"
+              done
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-db-credentials
+                  key: username
+            - name: POSTGRES_DB
+              value: sdr_scanner
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-db-credentials
+                  key: password
+          volumeMounts:
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-db-credentials
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-db-credentials
+                  key: password
+            - name: POSTGRES_DB
+              value: sdr_scanner
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "sdr_scanner"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "sdr_scanner"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+
+      volumes:
+        - name: init-sql
+          configMap:
+            name: postgres-init-sql
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: postgres
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+
+---
+# ── Services ───────────────────────────────────────────────────────────
+# Headless service for StatefulSet DNS (postgres-0.postgres-headless…)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: sdr-system
+  labels:
+    app: postgres
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      name: postgres
+
+---
+# Stable ClusterIP for app connections
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: sdr-system
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  type: ClusterIP
+
+---
+# ── NetworkPolicy ──────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-netpol
+  namespace: sdr-system
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: sdr-acquisition
+        - podSelector:
+            matchLabels:
+              app: sdr-analysis
+        - podSelector:
+            matchLabels:
+              app: signal-logger
+      ports:
+        - port: 5432
+          protocol: TCP
+
+---
+# ── PodDisruptionBudget ────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  namespace: sdr-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgres
