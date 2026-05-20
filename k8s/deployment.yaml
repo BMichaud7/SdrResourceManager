@@ -32,7 +32,7 @@ data:
       <broker>
         <url>amqp://activemq-service.sdr-system.svc.cluster.local:5672</url>
         <username>sdr_ctrl</username>
-        <password>CHANGE_ME</password>  <!-- !! Set this in your local devices.xml; never commit a real password -->
+        <password>${AMQP_PASSWORD}</password>
         <request_queue>sdr.task.request</request_queue>
         <response_queue>sdr.task.response</response_queue>
         <status_topic>sdr.status</status_topic>
@@ -277,16 +277,34 @@ spec:
       # Grace period: allow in-flight tasks to complete before SIGTERM
       terminationGracePeriodSeconds: 30
 
+      initContainers:
+        - name: render-config
+          image: python:3.12-alpine
+          command:
+            - python3
+            - -c
+            - |
+              import os, string
+              tmpl = open('/tmpl/devices.xml').read()
+              out  = string.Template(tmpl).safe_substitute(os.environ)
+              open('/out/devices.xml', 'w').write(out)
+          env:
+            - name: AMQP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-credentials
+                  key: amqp-password
+          volumeMounts:
+            - name: config-template
+              mountPath: /tmpl
+              readOnly: true
+            - name: config-rendered
+              mountPath: /out
+
       containers:
         - name: sdr-controller
           image: ghcr.io/bmichaud7/sdr-controller:2.1.0
           imagePullPolicy: Always
-
-          ports:
-            # IQ stream source ports (UDP, range 30000–31999)
-            # These are the source ports; DSP pods receive on their own ports.
-            # No inbound ports needed; controller initiates UDP streams outbound.
-            []
 
           env:
             - name: SDR_CONFIG_PATH
@@ -297,19 +315,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: AMQP_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: sdr-credentials
-                  key: amqp-username
-            - name: AMQP_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: sdr-credentials
-                  key: amqp-password
 
           volumeMounts:
-            - name: sdr-config-volume
+            - name: config-rendered
               mountPath: /etc/sdr-controller
               readOnly: true
 
@@ -347,12 +355,11 @@ spec:
               add: ["NET_RAW"]
 
       volumes:
-        - name: sdr-config-volume
+        - name: config-template
           configMap:
             name: sdr-config
-            items:
-              - key: devices.xml
-                path: devices.xml
+        - name: config-rendered
+          emptyDir: {}
 
       # Pod anti-affinity: don't co-locate with itself (only 1 replica anyway)
       affinity:
