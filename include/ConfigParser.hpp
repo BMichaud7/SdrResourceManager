@@ -35,6 +35,12 @@ struct DeviceConfig {
     // false = channels are independently tunable (e.g. RTL-SDR, HackRF, USRP B210).
     //         Different tasks may use different CFs concurrently.
     bool shared_lo = true;
+    // When > 0, the hardware sample rate is locked to this value on first tune
+    // and never changed again.  Tasks requesting a different rate are served at
+    // this rate; the IQ stream header reports the actual rate so consumers can
+    // decimate.  Eliminates the 3-4 s AD9361 BB-filter recalibration that fires
+    // on every setSampleRate() call.
+    double fixed_sample_rate_hz = 0.0;
 };
 
 struct BrokerConfig {

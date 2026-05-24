@@ -17,7 +17,12 @@ bool RadioDevice::open() {
     try {
         SoapySDR::Kwargs args;
         args["driver"] = cfg_.driver;
-        args["uri"]    = cfg_.uri;
+        // SoapyRemote uses key "remote" for the host:port; all other drivers
+        // use "uri" (libiio convention: "ip:192.168.1.x", "usb:X.Y.Z", etc.)
+        if (cfg_.driver == "remote")
+            args["remote"] = cfg_.uri;
+        else
+            args["uri"] = cfg_.uri;
         spdlog::info("[{}] Opening: driver={} uri={}", cfg_.id, cfg_.driver, cfg_.uri);
         dev_ = SoapySDR::Device::make(args);
         if (!dev_) { spdlog::error("[{}] make() returned nullptr", cfg_.id); return false; }
@@ -61,17 +66,24 @@ bool RadioDevice::tune(double cf_hz, double sr_sps) {
     std::lock_guard lock(mu_);
     if (!online_||!dev_) return false;
     try {
+        // If fixed_sample_rate_hz is configured, use it unconditionally and
+        // only call setSampleRate once (on first tune).  This avoids the 3-4 s
+        // AD9361 BB-filter recalibration that fires on every rate change.
+        const double target_rate = (cfg_.fixed_sample_rate_hz > 0.0)
+                                   ? cfg_.fixed_sample_rate_hz : sr_sps;
+
+        if (std::abs(target_rate - current_rate_) > 1.0) {
+            dev_->setSampleRate(SOAPY_SDR_RX, 0, target_rate);
+            dev_->setSampleRate(SOAPY_SDR_TX, 0, target_rate);
+            current_rate_ = target_rate;
+            spdlog::info("[{}] Sample rate set to {:.3f} MSPS", cfg_.id, target_rate/1e6);
+        }
+
+        // Pure LO hop — single IIO write, settles in ~25 µs on AD9361.
         dev_->setFrequency(SOAPY_SDR_RX, 0, cf_hz);
         dev_->setFrequency(SOAPY_SDR_TX, 0, cf_hz);
-        // setSampleRate on the AD9361 triggers a full PLL recalibration even
-        // when the rate is unchanged — skip it if the rate didn't change.
-        if (std::abs(sr_sps - current_rate_) > 1.0) {
-            dev_->setSampleRate(SOAPY_SDR_RX, 0, sr_sps);
-            dev_->setSampleRate(SOAPY_SDR_TX, 0, sr_sps);
-            current_rate_ = sr_sps;
-        }
         current_cf_ = cf_hz;
-        spdlog::info("[{}] Tuned {:.3f}MHz {:.3f}MSPS", cfg_.id, cf_hz/1e6, sr_sps/1e6);
+        spdlog::info("[{}] Tuned {:.3f} MHz {:.3f} MSPS", cfg_.id, cf_hz/1e6, current_rate_/1e6);
         return true;
     } catch (const std::exception& ex) {
         spdlog::error("[{}] tune() failed: {}", cfg_.id, ex.what()); return false;

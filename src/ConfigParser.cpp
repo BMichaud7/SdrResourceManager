@@ -103,6 +103,7 @@ AppConfig ConfigParser::parse(const std::string& path) {
         dc.caps.rx_gain_max_db      = optD(c,"rx_gain_max_db",71.0);
         dc.caps.tx_atten_min_db     = optD(c,"tx_atten_min_db",0.0);
         dc.caps.tx_atten_max_db     = optD(c,"tx_atten_max_db",89.0);
+        dc.fixed_sample_rate_hz     = optD(d,"fixed_sample_rate_hz", 0.0);
         cfg.devices.push_back(std::move(dc));
     }
     if (cfg.devices.empty())
