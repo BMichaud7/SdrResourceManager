@@ -1393,6 +1393,19 @@ void ResourceManager::activateTask(const std::string& task_id) {
 void ResourceManager::deactivateTask(const std::string& task_id,
                                       TaskState terminal_state,
                                       const std::string& reason) {
+    // Atomically claim deactivation rights under reg_mu_.
+    // If two threads race (e.g. stopTask() vs a background IQStreamer done-callback),
+    // only the first one proceeds.  The second finds state already terminal and returns.
+    {
+        std::lock_guard lock(reg_mu_);
+        auto it = registry_.find(task_id);
+        if (it == registry_.end() || isTerminalState(it->second.state))
+            return;
+        // Mark terminal immediately — prevents concurrent double-deactivation.
+        it->second.state           = terminal_state;
+        it->second.terminal_reason = reason;
+    }
+
     spdlog::info("deactivateTask [{}] → {} reason={}",
                  task_id, taskStateToString(terminal_state), reason);
 
@@ -1452,19 +1465,17 @@ void ResourceManager::deactivateTask(const std::string& task_id,
     if (scan_exec_to_stop) scan_exec_to_stop->stop();
     if (trig_mon_to_stop)  trig_mon_to_stop->stop();
 
-    // Release timeline slots and ports
+    // Release timeline slots and ports.
+    // State is already set to terminal at the top of this function.
     {
         std::lock_guard lock(reg_mu_);
         auto it = registry_.find(task_id);
         if (it != registry_.end()) {
-            auto& rec = it->second;
-            for (auto& alloc : rec.allocations) {
+            for (auto& alloc : it->second.allocations) {
                 if (timelines_.count(alloc.device_id))
                     timelines_[alloc.device_id]->remove(task_id);
                 port_pool_->releaseAll(alloc.udp_ports);
             }
-            rec.state           = terminal_state;
-            rec.terminal_reason = reason;
         }
     }
     notifyStateChange(task_id);
