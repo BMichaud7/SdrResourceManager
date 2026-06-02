@@ -1364,23 +1364,57 @@ void ResourceManager::activateTask(const std::string& task_id) {
         std::lock_guard lock(rt_mu_);
         runtimes_[task_id] = std::move(rt);
     }
+
+    // Final state transition: PENDING → RUNNING.
+    // Check for cancellation that arrived while we were activating hardware.
+    // deactivateTask() may have already set state to CANCELLED (and found no
+    // runtime to clean up, since we insert above).  If so, clean up now and
+    // return without setting RUNNING — this prevents zombie tasks.
+    bool was_cancelled = false;
     {
         std::lock_guard lock(reg_mu_);
         if (registry_.count(task_id)) {
             auto& r = registry_[task_id];
-            // For IMMEDIATE tasks the stop_time was computed at acceptance time.
-            // If hw activation was delayed (waiting on hw_activation_mu_) the
-            // deadline may already be past.  Reset it so the task gets its full
-            // intended duration from the moment hardware is actually running.
-            if (r.schedule_mode == ScheduleMode::IMMEDIATE &&
-                r.stop_time_ms  != TIME_INFINITE) {
-                int64_t duration_ms = r.stop_time_ms - r.start_time_ms;
-                int64_t now2        = nowMs();
-                r.start_time_ms = now2;
-                r.stop_time_ms  = now2 + duration_ms;
+            if (isTerminalState(r.state)) {
+                was_cancelled = true;  // deactivateTask already ran
+            } else {
+                // For IMMEDIATE tasks the stop_time was computed at acceptance time.
+                // If hw activation was delayed (waiting on hw_activation_mu_) the
+                // deadline may already be past.  Reset it so the task gets its full
+                // intended duration from the moment hardware is actually running.
+                if (r.schedule_mode == ScheduleMode::IMMEDIATE &&
+                    r.stop_time_ms  != TIME_INFINITE) {
+                    int64_t duration_ms = r.stop_time_ms - r.start_time_ms;
+                    int64_t now2        = nowMs();
+                    r.start_time_ms = now2;
+                    r.stop_time_ms  = now2 + duration_ms;
+                }
+                r.state = TaskState::RUNNING;
             }
-            r.state = TaskState::RUNNING;
         }
+    }
+
+    if (was_cancelled) {
+        // Task was cancelled while hardware was being set up.  The runtime is
+        // now in runtimes_ but deactivateTask() couldn't clean it (early-return
+        // on terminal state).  Remove it manually without going through the
+        // normal deactivate path (state is already terminal).
+        std::lock_guard lock(rt_mu_);
+        auto it = runtimes_.find(task_id);
+        if (it != runtimes_.end()) {
+            auto& r2 = it->second;
+            for (auto& streamer : r2.streamers) streamer->removeDest(task_id);
+            for (auto& [d, s] : r2.soapy_streams) {
+                if (r2.streamers[0] && r2.streamers[0]->totalConsumers() == 0)
+                    r2.streamers[0]->stop();
+                if (d && s) { d->deactivateStream(s); d->closeStream(s); }
+            }
+            if (r2.hw_lock.owns_lock()) r2.hw_lock.unlock();
+            runtimes_.erase(it);
+        }
+        spdlog::info("activateTask [{}] cancelled mid-activation — cleaned up", task_id);
+        notifyStateChange(task_id);
+        return;
     }
 
     std::string dev_list;
