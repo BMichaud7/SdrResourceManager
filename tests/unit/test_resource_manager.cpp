@@ -223,6 +223,9 @@ TEST(ResourceManager, ContinuousTaskAcceptRunStopPortsFreed) {
 
     auto resp = rm.tryAccept(makeContinuous("req-1", 915e6, 5e6, 10e6, 1));
     ASSERT_TRUE(resp.accepted);
+    // Task activation runs on a background thread — poll briefly for RUNNING.
+    for (int i = 0; i < 50 && rm.countByState(TaskState::RUNNING) == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 1);
     EXPECT_EQ(rm.udpPortsUsed(), 1);
 

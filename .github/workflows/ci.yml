@@ -45,4 +45,7 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run unit tests
-        run: ctest --test-dir build --output-on-failure -V --timeout 60
+        # Exclude hardware-driver tests (RtlSdr/LimeSdr/UsrpB210) — require
+        # physical SDR hardware or vendor drivers not installed in CI runners.
+        run: ctest --test-dir build --output-on-failure -V --timeout 60 \
+               -E "RtlSdr|LimeSdr|UsrpB210"
