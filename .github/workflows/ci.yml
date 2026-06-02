@@ -49,4 +49,4 @@ jobs:
         # physical SDR hardware or vendor drivers not installed in CI runners.
         run: |
           ctest --test-dir build --output-on-failure -V --timeout 60 \
-            -E "RtlSdr|LimeSdr|UsrpB210|HackRf|PlutoSdr|IndepLo_Continuous|PreferredChannel_OccupiedChannel|PreferredChannel_SharedLo_DifferentFreq"
+            -E "RtlSdr|LimeSdr|UsrpB210|HackRf|PlutoSdr|IndepLo_Continuous"

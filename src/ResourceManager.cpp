@@ -1484,9 +1484,11 @@ void ResourceManager::deactivateTask(const std::string& task_id,
     if (scan_exec_to_stop) scan_exec_to_stop->stop();
     if (trig_mon_to_stop)  trig_mon_to_stop->stop();
 
-    // Release timeline slots and ports.
-    // State is already set to terminal at the top of this function.
-    {
+    // Release timeline slots and ports — only on first deactivation.
+    // When already_terminal==true we are cleaning an orphaned runtime left by
+    // an activateTask() that ran after a prior deactivateTask() already released
+    // the ports. Releasing again would corrupt the pool.
+    if (!already_terminal) {
         std::lock_guard lock(reg_mu_);
         auto it = registry_.find(task_id);
         if (it != registry_.end()) {
