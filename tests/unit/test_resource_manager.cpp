@@ -74,7 +74,6 @@ static TaskRequest makeScheduled(const std::string& req_id,
     r.rf.rx_count        = rx;
     r.rf.tx_count        = 0;
     r.streaming.dest_ip  = "127.0.0.1";
-    r.streaming.dest_ports = {5000};
     return r;
 }
 
@@ -95,7 +94,6 @@ static TaskRequest makeContinuous(const std::string& req_id,
     r.rf.rx_count        = rx;
     r.rf.tx_count        = 0;
     r.streaming.dest_ip  = "127.0.0.1";
-    r.streaming.dest_ports = {5000};
     return r;
 }
 
