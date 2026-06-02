@@ -13,6 +13,15 @@ using namespace sdr;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// Poll until rm.countByState(state) == expected or timeout_ms elapses.
+// Task activation runs on a background thread; asserting immediately after
+// tryAccept() races against that thread.
+static void waitForState(ResourceManager& rm, TaskState state, int expected,
+                         int timeout_ms = 500) {
+    for (int i = 0; i < timeout_ms / 2 && rm.countByState(state) != expected; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+}
+
 static int64_t nowMs() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
@@ -348,6 +357,7 @@ TEST(ResourceManager, IndepLo_ContinuousTasksAtDifferentCfsRunSimultaneously) {
     auto r2 = rm.tryAccept(makeContinuous("req-2", 2400e6, 5e6, 10e6, 1));
     ASSERT_TRUE(r1.accepted);
     ASSERT_TRUE(r2.accepted);
+    waitForState(rm, TaskState::RUNNING, 2);
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 2);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -495,6 +505,7 @@ TEST(ResourceManager, Coherent_Continuous4ChannelTaskStreamsFromBothBoards) {
     auto resp = rm.tryAccept(r);
     ASSERT_TRUE(resp.accepted);
     EXPECT_EQ(resp.streams.size(), 4u);
+    waitForState(rm, TaskState::RUNNING, 1);
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 1);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -719,6 +730,7 @@ TEST(RtlSdr, ContinuousStreamRunsAndStopsCleanly) {
 
     auto resp = rm.tryAccept(makeContinuous("req-1", 433e6, 2e6, 2e6, 1));
     ASSERT_TRUE(resp.accepted);
+    waitForState(rm, TaskState::RUNNING, 1);
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     rm.stopTask(resp.task_id, "s1", "done");
@@ -783,6 +795,7 @@ TEST(HackRf, ContinuousStreamAtSubSeventy_MHzFrequency) {
 
     auto resp = rm.tryAccept(makeContinuous("req-1", 27e6, 2e6, 5e6, 1));
     ASSERT_TRUE(resp.accepted);
+    waitForState(rm, TaskState::RUNNING, 1);
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     rm.stopTask(resp.task_id, "s1", "done");
@@ -843,6 +856,7 @@ TEST(LimeSdr, Continuous2ChannelTaskStreamsBothChannels) {
     auto resp = rm.tryAccept(makeContinuous("req-1", 915e6, 5e6, 20e6, 2));
     ASSERT_TRUE(resp.accepted);
     EXPECT_EQ(resp.streams.size(), 2u);
+    waitForState(rm, TaskState::RUNNING, 1);
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     rm.stopTask(resp.task_id, "s1", "done");
@@ -914,6 +928,7 @@ TEST(UsrpB210, ContinuousIndependentStreamsAtDifferentCfsRunSimultaneously) {
     auto r2 = rm.tryAccept(makeContinuous("req-2", 2400e6, 5e6, 10e6, 1));
     ASSERT_TRUE(r1.accepted);
     ASSERT_TRUE(r2.accepted);
+    waitForState(rm, TaskState::RUNNING, 2);
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 2);
     EXPECT_EQ(rm.udpPortsUsed(), 2);
 
@@ -1301,6 +1316,7 @@ TEST(ResourceManager, CombinedWindow_StreamerKeptAliveWhenPrimaryStopsFirst) {
 
     // Stop task 1 — task 2 must remain RUNNING
     rm.stopTask(r1.task_id, "s1", "done");
+    waitForState(rm, TaskState::RUNNING, 1);
     EXPECT_EQ(rm.countByState(TaskState::RUNNING), 1);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
