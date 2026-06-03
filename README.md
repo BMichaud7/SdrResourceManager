@@ -1062,3 +1062,13 @@ Monitor via health topic. If `temperature_c > 70°C`:
 
 This system is designed and maintained by the SDR Engineering Team.
 For issues, file a ticket referencing the ICD document version (SDR-RRTM-ICD-002 v2.2).
+
+## Units and physical quantities
+
+The internal scheduler and hardware abstraction layer use raw `double` for
+performance-critical RF parameters (`freq_hz`, `bandwidth_hz`, `sample_rate_sps`).
+The **public API boundary** — task requests and responses — flows through
+[SdrTaskApi](https://github.com/BMichaud7/SdrTaskApi) which uses the
+[Au units library](https://github.com/aurora-opensource/au) to prevent unit
+mismatches at compile time. Consumers of the ResourceManager always express
+frequencies and durations as Au quantities.
