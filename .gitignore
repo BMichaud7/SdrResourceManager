@@ -43,3 +43,5 @@ CLAUDE.md
 # Generated docs
 docs/html/
 docs/master/
+build2/
+build_asan/
