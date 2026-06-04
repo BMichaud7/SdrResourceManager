@@ -10,6 +10,14 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file Ddc.hpp
+ * @brief Digital Down-Converter: frequency shift + FIR low-pass filter + decimate.
+ *
+ * Converts a wideband CF32 IQ stream to a narrower sub-band by mixing to
+baseband, filtering, and decimating. One instance per sub-band consumer in
+the shared-LO fan-out path.
+ */
 #pragma once
 #include <vector>
 
@@ -45,3 +53,11 @@ private:
 };
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

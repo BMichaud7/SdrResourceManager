@@ -10,6 +10,14 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file ScanExecutor.hpp
+ * @brief Background executor for SCAN tasks — tunes through a frequency step list.
+ *
+ * Runs in a dedicated thread. At each step it signals ResourceManager to retune,
+collects the dwell, then advances. Calls on_done() when all steps are complete
+or the task is cancelled.
+ */
 #pragma once
 #include "sdr/Types.hpp"
 #include <atomic>
@@ -51,3 +59,11 @@ private:
     void loop();
 };
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

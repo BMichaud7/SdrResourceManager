@@ -10,6 +10,14 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file AmqpClient.hpp
+ * @brief AMQP 1.0 client for ResourceManager — handles task request/response messaging.
+ *
+ * Runs a proton::container in a background thread. Subscribes to the task
+request queue, publishes TASK_ACCEPTED/REJECTED responses, and notifies the
+scheduler of new requests via a callback.
+ */
 #pragma once
 // ════════════════════════════════════════════════════════════════════════
 //  AmqpClient.hpp  —  qpid-proton AMQP 1.0 client with auto-reconnect
@@ -72,3 +80,11 @@ private:
 };
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

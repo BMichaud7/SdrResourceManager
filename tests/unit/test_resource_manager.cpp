@@ -1717,3 +1717,11 @@ TEST(PlutoSdr, StressTestFullStackTemperature60s) {
     for (auto& s : trace)
         EXPECT_LT(s.c, 95.0) << s.name << " hit " << s.c << "°C at t=" << s.t << "s";
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

@@ -10,6 +10,14 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file SpectrumTimeline.hpp
+ * @brief Time-frequency scheduling data structure for the ResourceManager scheduler.
+ *
+ * Tracks which time slots are occupied at which frequencies and on which channels.
+Provides canFit(), canCombine(), and slotsOverlapping() for the scheduler
+to determine how to allocate new tasks without conflicts.
+ */
 #pragma once
 // ════════════════════════════════════════════════════════════
 //  SpectrumTimeline.hpp
@@ -113,3 +121,11 @@ private:
 };
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

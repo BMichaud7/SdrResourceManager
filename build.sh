@@ -126,3 +126,9 @@ if [[ $RUN_TESTS -eq 1 ]]; then
     ctest --test-dir "$BUILD_DIR" --output-on-failure -V
     echo "[SdrResourceManager] All tests passed."
 fi
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

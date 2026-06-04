@@ -55,3 +55,9 @@ RC=$?
 echo "=== Tearing down ==="
 podman stop ctrl-integ ctrl-integ-broker 2>/dev/null || true
 exit $RC
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

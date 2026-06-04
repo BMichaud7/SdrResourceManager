@@ -419,3 +419,11 @@ TEST(SpectrumTimeline, PreferredChannel_SharedLo_SameCf_SecondSlice) {
     EXPECT_DOUBLE_EQ(r.device_cf,   CF);
     EXPECT_DOUBLE_EQ(r.device_rate, SR);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

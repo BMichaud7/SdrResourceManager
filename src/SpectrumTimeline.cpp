@@ -365,3 +365,11 @@ SpectrumTimeline::activeWindow(int64_t at_ms) const {
 }
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

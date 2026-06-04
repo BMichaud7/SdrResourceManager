@@ -10,6 +10,13 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file UdpPortPool.hpp
+ * @brief Thread-safe UDP port pool for IQ stream port allocation.
+ *
+ * Manages a contiguous range of UDP ports. allocateN() claims N ports atomically;
+releaseAll() returns them. Used by ResourceManager to assign per-task UDP ports.
+ */
 #pragma once
 #include <mutex>
 #include <set>
@@ -64,3 +71,11 @@ private:
 };
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

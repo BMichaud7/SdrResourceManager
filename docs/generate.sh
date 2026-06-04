@@ -65,3 +65,9 @@ run_doxygen "$DOXYFILE"
 echo ""
 echo "[generate] Done."
 echo "[generate] Open: file://$(pwd)/$OUT_DIR/index.html"
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

@@ -10,6 +10,14 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file IQStreamer.hpp
+ * @brief SoapySDR IQ capture thread — reads hardware and fans out to multiple UDP sockets.
+ *
+ * Owns one SoapySDR::Stream and one background worker thread. Supports multiple
+destinations (addDest) and DDC sub-band consumers (addSubBand). Used by
+ResourceManager::activateTask() for all IQ delivery.
+ */
 #pragma once
 #include "sdr/Types.hpp"
 #include "Ddc.hpp"
@@ -139,3 +147,11 @@ private:
 };
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

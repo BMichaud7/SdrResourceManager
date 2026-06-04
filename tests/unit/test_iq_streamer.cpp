@@ -431,3 +431,11 @@ TEST(IQStreamer, RemoveDestStopsDeliveryToThatClient) {
     streamer.stop();
     ::close(fd1); ::close(fd2);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

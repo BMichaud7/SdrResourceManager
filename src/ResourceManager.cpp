@@ -1616,3 +1616,11 @@ std::string ResourceManager::makeStreamId(const std::string& task_id,
 }
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

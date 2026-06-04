@@ -528,3 +528,11 @@ TEST(MessageCodec, EncodeTempResponse_MultipleDevicesAndSensors) {
     EXPECT_EQ(j["devices"][1]["sensors"].size(), 1u);
     EXPECT_NEAR(j["devices"][0]["sensors"][1]["value_c"].get<double>(), 52.1, 0.01);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

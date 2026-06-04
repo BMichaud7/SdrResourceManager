@@ -10,6 +10,13 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file TriggerMonitor.hpp
+ * @brief Background monitor for TRIGGERED tasks — waits for power threshold then captures.
+ *
+ * Samples the IQ stream power in real-time. When RMS exceeds threshold_dbfs it
+triggers a capture window and decrements the max_captures counter.
+ */
 #pragma once
 #include "sdr/Types.hpp"
 #include <SoapySDR/Device.hpp>
@@ -55,3 +62,11 @@ private:
     float rmsDbfs(const float* b, int n);
 };
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

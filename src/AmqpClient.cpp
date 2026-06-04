@@ -192,3 +192,11 @@ void AmqpClient::onConnected()    { connected_.store(true);  }
 void AmqpClient::onDisconnected() { connected_.store(false); }
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

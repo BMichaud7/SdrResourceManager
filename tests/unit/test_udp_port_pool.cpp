@@ -133,3 +133,11 @@ TEST(UdpPortPool, MinimalTwoPortPool) {
     EXPECT_EQ(pool.freeCount(), 0);
     EXPECT_EQ(pool.allocate(), -1);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

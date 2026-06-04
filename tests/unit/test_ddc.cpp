@@ -160,3 +160,11 @@ TEST(Ddc, MultipleBlocksProduceConsistentOutput) {
 
     EXPECT_EQ(n_big, n1 + n2);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

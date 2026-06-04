@@ -204,3 +204,11 @@ TEST(ScanExecutor, RetuneCalledExactlyOncePerStep) {
     ASSERT_TRUE(waitFor([&] { return done.load(); }));
     EXPECT_EQ(retune_count.load(), 4);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

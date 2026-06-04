@@ -10,6 +10,13 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file ConfigParser.hpp
+ * @brief XML configuration parser for SdrResourceManager device and policy settings.
+ *
+ * Reads devices.xml and produces an AppConfig containing DeviceConfig and
+PolicyConfig structs. Based on tinyxml2.
+ */
 #pragma once
 #include <string>
 #include <vector>
@@ -96,3 +103,11 @@ public:
 };
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

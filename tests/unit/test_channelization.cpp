@@ -364,3 +364,11 @@ TEST(Channelization, StopWithSubBandDoesNotCrash) {
     EXPECT_FALSE(streamer.isRunning());
     ::close(fd_primary); ::close(fd_sub);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

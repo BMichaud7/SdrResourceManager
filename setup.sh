@@ -514,3 +514,9 @@ echo "  Full docs: README.md, docs/ICD.md, docs/ARCHITECTURE.md"
 echo
 echo "${GREEN}${BOLD}Setup complete.${RESET}"
 echo
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

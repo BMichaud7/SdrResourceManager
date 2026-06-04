@@ -73,3 +73,11 @@ void ScanExecutor::loop() {
     if(done_) done_(task_id_,true);
 }
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

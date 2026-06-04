@@ -83,3 +83,11 @@ int main(int argc, char* argv[]) {
     spdlog::info("Clean shutdown complete");
     return EXIT_SUCCESS;
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

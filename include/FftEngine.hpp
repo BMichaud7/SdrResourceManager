@@ -10,6 +10,13 @@ Do not use for commercial, organizational, or military purposes.
 Contact author for permission: https://github.com/OpenRFStack
 ========================================================================
 */
+/**
+ * @file FftEngine.hpp
+ * @brief Welch-averaged FFT engine for spectrum analysis and signal detection.
+ *
+ * Computes a Blackman-Harris windowed, 50%-overlapping Welch PSD from CF32
+IQ samples. Returns a SnapshotResult with frequency and power axes.
+ */
 #pragma once
 #include "sdr/Types.hpp"
 #include <vector>
@@ -42,3 +49,11 @@ private:
 };
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

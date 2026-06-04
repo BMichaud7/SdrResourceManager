@@ -241,3 +241,9 @@ else
     tail -30 /tmp/k3s.log || true
     exit 1
 fi
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

@@ -94,3 +94,11 @@ int Ddc::process(const float* in, int n_in, float* out) {
 }
 
 } // namespace sdr
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

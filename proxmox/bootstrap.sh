@@ -152,3 +152,9 @@ echo "  To redeploy after a config change:"
 echo "    source /etc/sdr-stack.env"
 echo "    cd /opt/sdr/SdrResourceManager"
 echo "    bash k8s/deploy.sh"
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

@@ -176,3 +176,11 @@ TEST(TriggerMonitor, DoneCallbackFiredWhenMaxCapturesReached) {
     EXPECT_TRUE(done_ok.load());
     EXPECT_EQ(mon.captureCount(), 2);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

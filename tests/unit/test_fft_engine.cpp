@@ -185,3 +185,11 @@ TEST(FftEngine, ZeroAveragesReturnsFail) {
     auto r = eng.compute(s, fft_size, 0, 915e6, 10e6, 10e6, "dev-0");
     EXPECT_FALSE(r.success);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

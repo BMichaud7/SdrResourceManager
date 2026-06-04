@@ -214,3 +214,9 @@ else
     cat /tmp/sdr_controller.log
     exit 1
 fi
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

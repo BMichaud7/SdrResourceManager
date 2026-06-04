@@ -138,3 +138,9 @@ if ! $DRY_RUN; then
     echo "  kubectl logs -n sdr-system -l app=sdr-analysis -f"
     echo "  kubectl logs -n sdr-system -l app=signal-logger -f"
 fi
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

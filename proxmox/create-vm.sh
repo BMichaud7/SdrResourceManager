@@ -144,3 +144,9 @@ echo "    kubectl get pods -n sdr-system"
 echo ""
 echo "  The VM auto-starts with Proxmox (onboot=1)."
 echo "  k3s auto-starts via systemd — pods restart automatically on crash."
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

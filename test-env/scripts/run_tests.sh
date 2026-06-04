@@ -25,3 +25,9 @@ fi
 echo ""
 echo "── Running GTest suite ──────────────────────────────────────────────"
 ctest --test-dir "${BUILD_DIR}" --output-on-failure -V
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

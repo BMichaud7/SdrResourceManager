@@ -92,3 +92,11 @@ private:
     double gain_       = 30.0;
     int    stream_tok_ = 0;   // address used as opaque SoapySDR::Stream*
 };
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

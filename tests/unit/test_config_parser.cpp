@@ -252,3 +252,11 @@ TEST(ConfigParser, DeviceFreqRangeParsed) {
     EXPECT_DOUBLE_EQ(cfg.devices[0].caps.freq_min_hz,  70e6);
     EXPECT_DOUBLE_EQ(cfg.devices[0].caps.freq_max_hz,  6000e6);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

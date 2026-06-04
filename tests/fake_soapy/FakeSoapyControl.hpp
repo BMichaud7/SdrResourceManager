@@ -30,3 +30,11 @@ extern std::atomic<int>    read_delay_us;       // µs sleep inside readStream (
 void reset();  // restore all fields to their defaults
 
 } // namespace FakeSoapy
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/
