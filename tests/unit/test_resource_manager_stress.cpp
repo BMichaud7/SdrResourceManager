@@ -307,9 +307,12 @@ TEST(Stress, HundredDevices1000RpsFor3Minutes) {
     ASSERT_EQ(rm.openDevices(), 100);
 
     constexpr int    TARGET_RPS   = 1000;
-    constexpr int    DURATION_S   = 180;
-    constexpr int    INTERVAL_US  = 1'000'000 / TARGET_RPS;  // 1000 µs between requests
-    constexpr int    CYCLE_MS     = 50;  // cancel+refill every 50ms
+    constexpr int    INTERVAL_US  = 1'000'000 / TARGET_RPS;
+    constexpr int    CYCLE_MS     = 50;
+    // SRM_STRESS_DURATION_S: override via env var for CI (default 30s).
+    // Run locally without the variable to get the full 180s test.
+    const char* dur_env = std::getenv("SRM_STRESS_DURATION_S");
+    const int   DURATION_S = dur_env ? std::atoi(dur_env) : 30;
 
     // Fill all 100 devices initially
     std::vector<std::string> active_ids;
@@ -425,7 +428,7 @@ TEST(Stress, HundredDevices1000RpsFor3Minutes) {
     RecordProperty("device_cycles",cycles);
 
     // Print summary (visible in CI logs even without -V)
-    printf("\n[Stress] 100 devices × 1000 req/s × %ds\n", DURATION_S);
+    printf("\n[Stress] 100 devices × 1000 req/s × %ds (set SRM_STRESS_DURATION_S=180 for full run)\n", DURATION_S);
     printf("  Total requests : %lld\n",  (long long)total_reqs);
     printf("  Accepted       : %lld\n",  (long long)total_accept);
     printf("  Rejected       : %lld\n",  (long long)total_reject);

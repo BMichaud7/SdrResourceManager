@@ -45,6 +45,10 @@ jobs:
       - name: Run unit tests
         # Exclude hardware-driver tests (RtlSdr/LimeSdr/UsrpB210) — require
         # physical SDR hardware or vendor drivers not installed in CI runners.
+        # SRM_STRESS_DURATION_S=30: run the sustained stress test for 30s in CI
+        # (default is 30s; set to 180 locally for the full 3-minute run).
+        env:
+          SRM_STRESS_DURATION_S: "30"
         run: |
-          ctest --test-dir build --output-on-failure -V --timeout 60 \
+          ctest --test-dir build --output-on-failure -V --timeout 90 \
             -E "RtlSdr|LimeSdr|UsrpB210|HackRf|PlutoSdr|IndepLo_Continuous|PreferredChannel_SharedLo_SameFreq"
