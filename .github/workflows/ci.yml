@@ -43,12 +43,18 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run unit tests
-        # Exclude hardware-driver tests (RtlSdr/LimeSdr/UsrpB210) — require
-        # physical SDR hardware or vendor drivers not installed in CI runners.
-        # SRM_STRESS_DURATION_S=30: run the sustained stress test for 30s in CI
-        # (default is 30s; set to 180 locally for the full 3-minute run).
+        # Exclude hardware tests (no physical devices) and the sustained stress
+        # test (run separately below in its own process to avoid teardown races).
+        run: |
+          ctest --test-dir build --output-on-failure -V --timeout 60 \
+            -E "RtlSdr|LimeSdr|UsrpB210|HackRf|PlutoSdr|IndepLo_Continuous|PreferredChannel_SharedLo_SameFreq|HundredDevices1000Rps"
+
+      - name: Run sustained stress test (isolated process)
+        # Run the 100-device 1000-req/s test in its own process so RM destructor
+        # teardown races from prior tests don't interfere. 30s duration in CI.
         env:
           SRM_STRESS_DURATION_S: "30"
         run: |
-          ctest --test-dir build --output-on-failure -V --timeout 90 \
-            -E "RtlSdr|LimeSdr|UsrpB210|HackRf|PlutoSdr|IndepLo_Continuous|PreferredChannel_SharedLo_SameFreq"
+          build/tests/sdr_tests \
+            --gtest_filter='Stress.HundredDevices1000RpsFor3Minutes' \
+            --gtest_color=no
