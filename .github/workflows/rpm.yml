@@ -22,14 +22,7 @@ jobs:
           dnf install -y gh --repo gh-cli
 
       - name: Install app dependencies
-        run: |
-          dnf install -y \
-            SoapySDR-devel \
-            qpid-proton-cpp-devel \
-            tinyxml2-devel \
-            fftw-devel \
-            spdlog-devel fmt-devel \
-            libuuid-devel || true
+        run: dnf install -y SoapySDR-devel qpid-proton-cpp-devel tinyxml2-devel fftw-devel spdlog-devel fmt-devel libuuid-devel
 
       - uses: actions/checkout@v4
 
