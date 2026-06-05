@@ -1,7 +1,6 @@
-%global _version %{getenv:PACKAGE_VERSION}
-
+%global debug_package %{nil}
 Name:           sdr-controller
-Version:        %{_version}
+Version:        %{pkg_version}
 Release:        1%{?dist}
 Summary:        OpenRFStack SdrResourceManager — SDR hardware arbitration and task scheduler
 License:        Proprietary
@@ -35,17 +34,11 @@ CF32 IQ data to clients over UDP.
 
 Supports: RTL-SDR, PlutoSDR (Ethernet + USB), LimeSDR, HackRF, USRP B210.
 
+%prep
 %build
-cmake -B %{_builddir}/build -S %{_sourcedir} -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build %{_builddir}/build --parallel
-
 %install
-DESTDIR=%{buildroot} cmake --install %{_builddir}/build
 
 %files
-%license LICENSE
 /usr/bin/sdr_controller
 
 %changelog
