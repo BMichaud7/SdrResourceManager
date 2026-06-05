@@ -1,0 +1,112 @@
+name: RPM Package
+
+on:
+  push:
+    branches: ["main/1.0"]
+  workflow_dispatch:
+
+jobs:
+  rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux:9
+
+    steps:
+      - name: Install build tools and dependencies
+        run: |
+          dnf install -y epel-release dnf-plugins-core
+          dnf install -y \
+            cmake ninja-build gcc-c++ git pkg-config \
+            rpm-build rpmdevtools \
+            SoapySDR-devel \
+            qpid-proton-cpp-devel \
+            tinyxml2-devel \
+            fftw-devel \
+            spdlog-devel fmt-devel \
+            libuuid-devel \
+            gh
+
+      - uses: actions/checkout@v4
+
+      - name: Clone sibling dependencies
+        run: |
+          git clone --depth 1 --branch main/1.0 \
+            https://github.com/OpenRFStack/SdrSdk.git ../SdrSdk
+          git clone --depth 1 --branch main/1.0 \
+            https://github.com/OpenRFStack/SdrTaskApi.git ../SdrTaskApi
+
+      - name: Build
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build --parallel
+          DESTDIR=$PWD/install cmake --install build
+
+      - name: Package RPM
+        run: |
+          VERSION=$(grep 'project(sdr_controller' CMakeLists.txt \
+            | grep -oP '\d+\.\d+\.\d+' || echo "2.2.0")
+          ARCH=x86_64
+          PKG=sdr-controller
+          BROOT="$HOME/rpmbuild/BUILDROOT/${PKG}-${VERSION}-1.${ARCH}"
+
+          rpmdev-setuptree
+          mkdir -p "$BROOT/usr/bin"
+          cp install/usr/bin/sdr_controller "$BROOT/usr/bin/"
+
+          cat > "$HOME/rpmbuild/SPECS/${PKG}.spec" << SPEC
+%global debug_package %{nil}
+Name:       ${PKG}
+Version:    ${VERSION}
+Release:    1%{?dist}
+Summary:    OpenRFStack SDR resource manager and hardware arbitration controller
+License:    Proprietary
+URL:        https://github.com/OpenRFStack/SdrResourceManager
+BuildArch:  ${ARCH}
+AutoReqProv: no
+Requires:   SoapySDR qpid-proton-cpp tinyxml2 fftw spdlog fmt libuuid
+
+%description
+SdrResourceManager arbitrates all SDR hardware devices on a host. Accepts
+SCAN, NARROWBAND, and DF task requests over AMQP 1.0, enforces priority
+preemption (rank 1-3), and streams CF32 IQ data to clients over UDP.
+Supports RTL-SDR, PlutoSDR, LimeSDR, HackRF, USRP B210 via SoapySDR.
+
+%prep
+%build
+%install
+
+%files
+/usr/bin/sdr_controller
+
+%changelog
+* $(date "+%a %b %d %Y") OpenRFStack CI <noreply@github.com> - ${VERSION}-1
+- Automated build from main/1.0
+SPEC
+
+          rpmbuild -bb \
+            --define "_topdir $HOME/rpmbuild" \
+            --buildroot "$BROOT" \
+            "$HOME/rpmbuild/SPECS/${PKG}.spec"
+
+          mkdir -p rpm_out
+          find "$HOME/rpmbuild/RPMS" -name "*.rpm" -exec cp {} rpm_out/ \;
+          ls -lh rpm_out/
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=latest-main
+          # Ensure the rolling pre-release exists
+          gh release view "$TAG" --repo ${{ github.repository }} 2>/dev/null || \
+            gh release create "$TAG" \
+              --repo ${{ github.repository }} \
+              --title "Latest build" \
+              --notes "Rolling pre-release from main/1.0" \
+              --prerelease
+          # Upload (replace existing assets with same name)
+          gh release upload "$TAG" rpm_out/*.rpm \
+            --repo ${{ github.repository }} \
+            --clobber
