@@ -47,7 +47,9 @@ jobs:
           BROOT="$HOME/rpmbuild/BUILDROOT/sdr-controller-${VERSION}-1.x86_64"
           rpmdev-setuptree
           mkdir -p "$BROOT/usr/bin"
-          cp install/usr/bin/sdr_controller "$BROOT/usr/bin/"
+          BIN=$(find install -name "sdr_controller" -type f | head -1)
+          [ -z "$BIN" ] && BIN=$(find build -name "sdr_controller" -type f | head -1)
+          cp "$BIN" "$BROOT/usr/bin/"
           cp packaging/sdr-controller.spec "$HOME/rpmbuild/SPECS/"
           rpmbuild -bb \
             --define "_topdir $HOME/rpmbuild" \
