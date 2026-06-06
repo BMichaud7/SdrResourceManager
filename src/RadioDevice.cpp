@@ -31,9 +31,10 @@ bool RadioDevice::open() {
         args["driver"] = cfg_.driver;
         // SoapyRemote uses key "remote" for the host:port; all other drivers
         // use "uri" (libiio convention: "ip:192.168.1.x", "usb:X.Y.Z", etc.)
+        // Omit uri when empty — lets the driver auto-discover (e.g. SoapyPlutoSDR USB scan).
         if (cfg_.driver == "remote")
             args["remote"] = cfg_.uri;
-        else
+        else if (!cfg_.uri.empty())
             args["uri"] = cfg_.uri;
         spdlog::info("[{}] Opening: driver={} uri={}", cfg_.id, cfg_.driver, cfg_.uri);
         dev_ = SoapySDR::Device::make(args);

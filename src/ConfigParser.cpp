@@ -98,7 +98,7 @@ AppConfig ConfigParser::parse(const std::string& path) {
         DeviceConfig dc;
         dc.id                  = id;
         dc.driver              = opt(d,"driver","remote");
-        dc.uri                 = req(d,"uri");
+        dc.uri                 = opt(d,"uri","");
         dc.label               = opt(d,"label",dc.id.c_str());
         dc.streaming_source_ip = opt(d,"streaming_source_ip","127.0.0.1");
         dc.coherency_group     = opt(d,"coherency_group","");
