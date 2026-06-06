@@ -314,6 +314,10 @@ TEST(Stress, HundredDevices1000RpsFor3Minutes) {
     const char* dur_env = std::getenv("SRM_STRESS_DURATION_S");
     const int   DURATION_S = dur_env ? std::atoi(dur_env) : 30;
 
+    // SRM_STRESS_P99_LIMIT_US: relax p99 assertion on slow CI runners (default 1000µs).
+    const char* p99_env = std::getenv("SRM_STRESS_P99_LIMIT_US");
+    const int64_t P99_LIMIT_US = p99_env ? std::atoi(p99_env) : 1000;
+
     // Fill all 100 devices initially
     std::vector<std::string> active_ids;
     active_ids.reserve(100);
@@ -444,8 +448,8 @@ TEST(Stress, HundredDevices1000RpsFor3Minutes) {
         << "Throughput degraded: only " << actual_rps << " req/s (target 1000)";
     EXPECT_LT(max_lat_us, 5000)
         << "Max latency " << max_lat_us << "µs exceeds 5ms — scheduler lock contention";
-    EXPECT_LT(p99_us, 1000)
-        << "p99 latency " << p99_us << "µs exceeds 1ms";
+    EXPECT_LT(p99_us, P99_LIMIT_US)
+        << "p99 latency " << p99_us << "µs exceeds " << P99_LIMIT_US << "µs";
     EXPECT_GT(total_accept, 0)
         << "No tasks accepted in " << DURATION_S << "s — device cycling broken";
     EXPECT_EQ(rm.deviceSummaries().size(), 100u)

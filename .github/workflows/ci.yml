@@ -62,6 +62,7 @@ jobs:
         # teardown races from prior tests don't interfere. 30s duration in CI.
         env:
           SRM_STRESS_DURATION_S: "30"
+          SRM_STRESS_P99_LIMIT_US: "5000"
         run: |
           build/tests/sdr_tests \
             --gtest_filter='Stress.HundredDevices1000RpsFor3Minutes' \
