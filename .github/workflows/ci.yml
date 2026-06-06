@@ -47,7 +47,7 @@ jobs:
         # test (run separately below in its own process to avoid teardown races).
         run: |
           ctest --test-dir build --output-on-failure -V --timeout 60 \
-            -E "RtlSdr|LimeSdr|UsrpB210|HackRf|PlutoSdr|IndepLo_Continuous|PreferredChannel_SharedLo_SameFreq|HundredDevices1000Rps|CombinedWindow_ThirdTask|CombinedWindow_Rejected"
+            -E "RtlSdr|LimeSdr|UsrpB210|HackRf|PlutoSdr|IndepLo_Continuous|PreferredChannel_SharedLo_SameFreq|HundredDevices1000Rps|CombinedWindow"
 
       - name: Run CombinedWindow tests (isolated process)
         # These tests start IQStreamers and have a teardown race when run
