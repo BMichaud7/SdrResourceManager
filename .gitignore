@@ -25,6 +25,9 @@ CTestTestfile.cmake
 sdr_controller
 sdr_client
 
+# Python
+__pycache__/
+
 # Editor / OS
 .vscode/
 .idea/
