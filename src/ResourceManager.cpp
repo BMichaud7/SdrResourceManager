@@ -90,6 +90,46 @@ void ResourceManager::closeDevices() {
     for (auto& id : active_ids)
         deactivateTask(id, TaskState::CANCELLED, "controller shutdown");
 
+    // A detached activateTask() thread may have already passed its
+    // terminal-state check (above) and be mid-flight opening hardware /
+    // starting an IQStreamer when this call raced ahead of it. Wait for any
+    // such in-flight activations to finish before touching the devices —
+    // otherwise dev->close() (and the eventual device destruction) can run
+    // concurrently with that thread's SoapySDR calls and IQStreamer worker.
+    //
+    // While waiting, keep re-running deactivation for any task that currently
+    // has a live runtime: an in-flight activateTask() may itself be blocked on
+    // hw_activation_mu_, held by another task's orphaned runtime (one whose
+    // activateTask() raced past the terminal-state checks and inserted a
+    // runtime, with hw_lock still held, AFTER our pass(es) above already found
+    // it terminal with no runtime to clean up). deactivateTask's "orphaned
+    // runtime" path releases that runtime's hw_lock, unblocking the in-flight
+    // activation so activations_in_flight_ can reach zero.
+    //
+    // We must scan runtimes_ directly rather than the active_ids snapshot
+    // above: a task can already be terminal (and absent from active_ids) at
+    // snapshot time yet still have its activateTask() thread in flight,
+    // inserting an orphaned runtime later. Without this, the wait below can
+    // deadlock.
+    auto deactivateOrphanedRuntimes = [this]() {
+        std::vector<std::string> ids;
+        {
+            std::lock_guard lock(rt_mu_);
+            for (auto& [id, rt] : runtimes_) ids.push_back(id);
+        }
+        for (auto& id : ids)
+            deactivateTask(id, TaskState::CANCELLED, "controller shutdown");
+    };
+
+    while (activations_in_flight_.load(std::memory_order_relaxed) > 0) {
+        deactivateOrphanedRuntimes();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Final pass for any runtime inserted just as the last in-flight
+    // activation finished.
+    deactivateOrphanedRuntimes();
+
     for (auto& [id, dev] : devices_) dev->close();
 }
 
@@ -108,16 +148,24 @@ ResourceManager::findBestDevice(double cf, double bw, double sr,
     for (auto& [id, _] : devices_)
         if (id != preferred) ordered.push_back(id);
 
-    // Sort non-preferred by free BW
+    // Sort non-preferred by free BW (preferred, if present, stays first).
+    // Snapshot each device's allocated bandwidth once up front: reading it
+    // live inside the comparator would let a concurrent insert()/remove()
+    // on another thread change the value mid-sort, violating stable_sort's
+    // comparator-consistency precondition (and causing UB in libstdc++'s
+    // unguarded insertion sort).
     if (ordered.size() > 1) {
-        auto pref_it = (!preferred.empty() && devices_.count(preferred))
-                       ? ordered.begin() : ordered.end();
-        std::stable_sort(pref_it == ordered.begin() ? pref_it+1 : ordered.begin(),
-                         ordered.end(),
+        const int64_t now = nowMs();
+        std::unordered_map<std::string, double> alloc_bw;
+        alloc_bw.reserve(ordered.size());
+        for (auto& id : ordered)
+            alloc_bw[id] = timelines_.at(id)->allocatedBw(now);
+
+        std::stable_sort(ordered.begin(), ordered.end(),
                          [&](const std::string& a, const std::string& b) {
-                             auto ta = timelines_.at(a)->allocatedBw(nowMs());
-                             auto tb = timelines_.at(b)->allocatedBw(nowMs());
-                             return ta < tb;   // less allocated = more free
+                             if (a == preferred || b == preferred)
+                                 return a == preferred; // preferred sorts first
+                             return alloc_bw.at(a) < alloc_bw.at(b);   // less allocated = more free
                          });
     }
 
@@ -490,7 +538,13 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
     { std::lock_guard lock(reg_mu_); registry_[task_id] = rec; }
     // Run activateTask in a background thread so the proton AMQP thread
     // is not blocked by SoapySDR hardware I/O (openRxStream can take seconds).
-    if (activate_now) std::thread([this, task_id]() { activateTask(task_id); }).detach();
+    if (activate_now) {
+        activations_in_flight_.fetch_add(1, std::memory_order_relaxed);
+        std::thread([this, task_id]() {
+            activateTask(task_id);
+            activations_in_flight_.fetch_sub(1, std::memory_order_relaxed);
+        }).detach();
+    }
     notifyStateChange(task_id);
     return resp;
 }
@@ -728,7 +782,11 @@ TaskResponse ResourceManager::doAcceptCalibration(const TaskRequest& req) {
 
     // Run activateTask in a background thread so the proton AMQP thread
     // is not blocked by SoapySDR hardware I/O (openRxStream can take seconds).
-    std::thread([this, task_id]() { activateTask(task_id); }).detach();
+    activations_in_flight_.fetch_add(1, std::memory_order_relaxed);
+    std::thread([this, task_id]() {
+        activateTask(task_id);
+        activations_in_flight_.fetch_sub(1, std::memory_order_relaxed);
+    }).detach();
     notifyStateChange(task_id);
     return resp;
 }
@@ -1139,9 +1197,11 @@ void ResourceManager::activateTask(const std::string& task_id) {
         spdlog::error("activateTask [{}]: no allocations", task_id); return;
     }
 
-    // Serialize hardware open/close across background threads — only one task at a
-    // time may open a SoapySDR stream.  The lock is stored in TaskRuntime and
-    // released in deactivateTask after the stream is closed.
+    // Serialize hardware open calls (tune/openRxStream/activateStream) across
+    // background threads — only one task at a time may set up a SoapySDR
+    // stream. Released below once per-allocation hardware setup completes;
+    // NOT held for the task's RUNNING lifetime (that would serialize
+    // independent-LO channels on the same device against each other).
     std::unique_lock<std::mutex> hw_lock(hw_activation_mu_);
 
     // Check state again after acquiring hw_lock: task may have been cancelled while waiting.
@@ -1165,6 +1225,7 @@ void ResourceManager::activateTask(const std::string& task_id) {
     for (auto& alloc : rec.allocations) {
         auto dev_it = devices_.find(alloc.device_id);
         if (dev_it == devices_.end()) {
+            hw_lock.unlock();
             deactivateTask(task_id, TaskState::FAILED,
                            "Device not found: " + alloc.device_id); return;
         }
@@ -1242,6 +1303,7 @@ void ResourceManager::activateTask(const std::string& task_id) {
             } else {
                 // New channel(s) — tune device, open stream, create IQStreamer(s)
                 if (!dev->tune(alloc.center_freq_hz, alloc.sample_rate_sps)) {
+                    hw_lock.unlock();
                     deactivateTask(task_id, TaskState::FAILED,
                                    "Tune failed on " + alloc.device_id); return;
                 }
@@ -1249,11 +1311,13 @@ void ResourceManager::activateTask(const std::string& task_id) {
 
                 SoapySDR::Stream* s = dev->openRxStream(alloc.rx_channels);
                 if (!s) {
+                    hw_lock.unlock();
                     deactivateTask(task_id, TaskState::FAILED,
                                    "openRxStream failed on " + alloc.device_id); return;
                 }
                 if (!dev->activateStream(s)) {
                     dev->closeStream(s);
+                    hw_lock.unlock();
                     deactivateTask(task_id, TaskState::FAILED,
                                    "activateStream failed on " + alloc.device_id); return;
                 }
@@ -1294,6 +1358,7 @@ void ResourceManager::activateTask(const std::string& task_id) {
             for (int i=0; i<(int)alloc.rx_channels.size(); ++i) {
                 int ch = alloc.rx_channels[i];
                 if (!dev->tuneChannel(ch, alloc.center_freq_hz, alloc.sample_rate_sps)) {
+                    hw_lock.unlock();
                     deactivateTask(task_id, TaskState::FAILED,
                                    "tuneChannel failed ch="+std::to_string(ch)); return;
                 }
@@ -1301,11 +1366,13 @@ void ResourceManager::activateTask(const std::string& task_id) {
 
                 SoapySDR::Stream* s = dev->openRxStream({ch});
                 if (!s) {
+                    hw_lock.unlock();
                     deactivateTask(task_id, TaskState::FAILED,
                                    "openRxStream failed ch="+std::to_string(ch)); return;
                 }
                 if (!dev->activateStream(s)) {
                     dev->closeStream(s);
+                    hw_lock.unlock();
                     deactivateTask(task_id, TaskState::FAILED,
                                    "activateStream failed ch="+std::to_string(ch)); return;
                 }
@@ -1327,6 +1394,11 @@ void ResourceManager::activateTask(const std::string& task_id) {
             }
         }
     }
+
+    // Hardware setup for all allocations is complete — release hw_activation_mu_
+    // so other tasks (e.g. independent-LO channels on the same device) can
+    // proceed with their own setup while this task runs.
+    hw_lock.unlock();
 
     // Scan and trigger only apply to single-device tasks (first allocation).
     const auto& alloc0 = rec.allocations[0];
@@ -1367,10 +1439,6 @@ void ResourceManager::activateTask(const std::string& task_id) {
             alloc0.sample_rate_sps, trig_done);
         rt.trig_mon->start();
     }
-
-    // Transfer the hw_lock into the runtime so deactivateTask releases it
-    // after closing the stream (not before IQStreamer is stopped).
-    rt.hw_lock = std::move(hw_lock);
 
     {
         std::lock_guard lock(rt_mu_);
@@ -1447,6 +1515,10 @@ void ResourceManager::deactivateTask(const std::string& task_id,
     std::unique_ptr<ScanExecutor>    scan_exec_to_stop;
     std::unique_ptr<TriggerMonitor>  trig_mon_to_stop;
     {
+        // Acquire hw_activation_mu_ before rt_mu_ (matching activateTask's lock
+        // ordering) — deactivateStream/closeStream below must be serialized
+        // against concurrent hardware setup in activateTask.
+        std::lock_guard hwlock(hw_activation_mu_);
         std::lock_guard lock(rt_mu_);
         auto it = runtimes_.find(task_id);
         if (it != runtimes_.end()) {
@@ -1485,9 +1557,6 @@ void ResourceManager::deactivateTask(const std::string& task_id,
                     d->closeStream(s);
                 }
             }
-            // Release hw_activation_mu_ AFTER the stream is closed so the next
-            // background activation thread can safely open hardware.
-            if (rt.hw_lock.owns_lock()) rt.hw_lock.unlock();
             runtimes_.erase(it);
         }
     }
