@@ -46,6 +46,7 @@ Contact author for permission: https://github.com/OpenRFStack
 #include <vector>
 #include <functional>
 #include <chrono>
+#include <atomic>
 
 namespace sdr {
 
@@ -177,15 +178,22 @@ private:
         std::vector<std::shared_ptr<IQStreamer>> streamers;
         std::unique_ptr<ScanExecutor>            scan_exec;
         std::unique_ptr<TriggerMonitor>          trig_mon;
-        /// Held during hardware open; released in deactivateTask after stream close.
-        std::unique_lock<std::mutex>             hw_lock;
         bool                                     is_subband_consumer = false;
     };
     mutable std::mutex                              rt_mu_;
     std::unordered_map<std::string, TaskRuntime>    runtimes_;
 
-    /// Serialises SoapySDR open/close across background activation threads.
+    /// Serialises SoapySDR open and close calls (tune/openRxStream/activateStream/
+    /// deactivateStream/closeStream) across background activation/deactivation
+    /// threads. Held only for the duration of those calls — NOT for a task's
+    /// entire RUNNING lifetime — so independent-LO channels on the same device
+    /// can run concurrently once setup completes.
     std::mutex hw_activation_mu_;
+
+    /// Number of detached activateTask() background threads currently running.
+    /// closeDevices() waits for this to reach zero before closing devices, so
+    /// an in-flight activation can never open/use a device that's being closed.
+    std::atomic<int> activations_in_flight_{0};
 
     std::chrono::steady_clock::time_point start_time_;
 
