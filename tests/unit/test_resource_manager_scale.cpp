@@ -54,15 +54,6 @@ static int64_t nowMs() {
         system_clock::now().time_since_epoch()).count();
 }
 
-static bool waitForAtLeast(ResourceManager& rm, TaskState state, int expected,
-                            int timeout_ms = 5000) {
-    for (int i = 0; i < timeout_ms / 5; ++i) {
-        if (rm.countByState(state) >= expected) return true;
-        std::this_thread::sleep_for(milliseconds(5));
-    }
-    return false;
-}
-
 /// Build AppConfig with n single-channel fake devices.
 /// bandwidth_max_hz=9e6 (just above task BW of 8e6) prevents combined-window
 /// so each device serves exactly one task at a time.
@@ -146,30 +137,6 @@ static TaskRequest makeScanRequest(const std::string& req_id,
         sp.entries.push_back(e);
     }
     r.scan_params = sp;
-    return r;
-}
-
-static TaskRequest makeContinuousRequest(const std::string& req_id,
-                                          double cf, double bw, double sr,
-                                          int rank = 1,
-                                          const std::string& preferred = "") {
-    TaskRequest r;
-    r.msg_type            = "TASK_REQUEST_CONTINUOUS";
-    r.request_id          = req_id;
-    r.schema_version      = "2.0";
-    r.timestamp_ms        = nowMs();
-    r.task_type           = TaskType::NARROWBAND;
-    r.schedule_mode       = ScheduleMode::CONTINUOUS;
-    r.start_time_ms       = nowMs();
-    r.end_time_ms         = TIME_INFINITE;
-    r.rank                = rank;
-    r.rf.center_freq_hz   = cf;
-    r.rf.bandwidth_hz     = bw;
-    r.rf.sample_rate_sps  = sr;
-    r.rf.rx_count         = 1;
-    r.rf.tx_count         = 0;
-    r.rf.preferred_device = preferred;
-    r.streaming.dest_ip   = "127.0.0.1";
     return r;
 }
 
