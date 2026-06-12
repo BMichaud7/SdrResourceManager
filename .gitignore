@@ -44,4 +44,16 @@ CLAUDE.md
 docs/html/
 docs/master/
 build2/
+build3/
 build_asan/
+build_test/
+
+# In-source CMake build artifacts (accidental `cmake .` from repo root)
+/Makefile
+/DartConfiguration.tcl
+/_deps/
+/SdrSdk/
+/SdrTaskApi/
+tests/Makefile
+tests/sdr_tests
+client/Makefile
