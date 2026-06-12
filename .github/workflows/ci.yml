@@ -63,6 +63,7 @@ jobs:
         env:
           SRM_STRESS_DURATION_S: "30"
           SRM_STRESS_P99_LIMIT_US: "5000"
+          SRM_STRESS_MAX_LAT_LIMIT_US: "10000"
         run: |
           build/tests/sdr_tests \
             --gtest_filter='Stress.HundredDevices1000RpsFor3Minutes' \
