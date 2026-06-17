@@ -1,0 +1,73 @@
+---
+# compose.pi4.yml — OpenRFStack Pi4 lightweight stack
+#
+# Single container: sdr_controller + sdr_acquisition + GpsApp + qdrouterd.
+# No k3s, no Java, no PostgreSQL. Target RAM: ~235 MB idle.
+#
+# Build:
+#   podman compose -f compose.pi4.yml build
+#
+# Run:
+#   podman compose -f compose.pi4.yml up -d
+#
+# Logs:
+#   podman compose -f compose.pi4.yml logs -f
+#
+# Override config at runtime (optional):
+#   Mount custom XMLs to /etc/sdr-controller/devices.xml etc.
+
+services:
+  sdr-pi4:
+    build:
+      context: ..               # parent dir containing all sibling repos
+      dockerfile: SdrResourceManager/Containerfile.pi4
+      platforms:
+        - linux/arm64
+    image: openrfstack-pi4:latest
+    container_name: sdr-pi4
+    restart: unless-stopped
+
+    # host networking: sdr_controller streams IQ to sdr_acquisition via UDP
+    # loopback; broker listens on :5672 for any local client.
+    network_mode: host
+
+    # RTL-SDR USB access + optional GPS serial
+    privileged: true
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      # GPS dongle — comment out if no GPS hardware attached
+      - /dev/ttyACM0:/dev/ttyACM0
+      # Persistent GPS fix log
+      - sdr-pi4-gps:/var/lib/sdr/gps
+      # FFTW wisdom cache (speeds up FFT init on restart)
+      - sdr-pi4-fftw:/var/cache/sdr-acquisition
+      # ── Optional config overrides ──────────────────────────────────────
+      # Uncomment to mount your own device or scanner config:
+      # - ./config/pi4/devices-rtlsdr.xml:/etc/sdr-controller/devices.xml:ro,z
+      # - ./config/pi4/scanner-pi4.xml:/etc/sdr-acquisition/scanner.xml:ro,z
+      # - ./config/pi4/gps-pi4.xml:/etc/sdr-gps/gps.xml:ro,z
+
+    environment:
+      SDR_LOG_LEVEL: info
+      # Set to your GPS serial device node inside the container
+      GPS_DEVICE: /dev/ttyACM0
+
+    # Resource limits — comfortable on 1 GB Pi4
+    deploy:
+      resources:
+        limits:
+          memory: 512M          # hard ceiling; typical idle is ~235 MB
+        reservations:
+          memory: 128M
+
+    healthcheck:
+      # Broker port open = all services bootstrapped
+      test: ["CMD", "nc", "-z", "127.0.0.1", "5672"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  sdr-pi4-gps:
+  sdr-pi4-fftw:

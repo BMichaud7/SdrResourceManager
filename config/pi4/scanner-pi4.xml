@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Pi4 scanner config — lightweight sweep for RTL-SDR.
+  No PostgreSQL: detections are published to rf.detections AMQP topic only.
+  Override at runtime: -v /path/to/scanner-pi4.xml:/etc/sdr-acquisition/scanner.xml:ro,z
+-->
+<sdr_acquisition version="2.0">
+
+  <scanner_id>pi4-scanner-0</scanner_id>
+
+  <amqp>
+    <url>amqp://localhost:5672</url>
+    <username>scanner</username>
+    <password>sdr_hw_test</password>
+    <detection_topic>rf.detections</detection_topic>
+    <task_request_queue>sdr.task.request</task_request_queue>
+    <task_response_queue>sdr.task.response</task_response_queue>
+    <reconnect_interval_sec>3</reconnect_interval_sec>
+  </amqp>
+
+  <!-- No database section — libpqxx built in but no postgres server on Pi4.
+       Detections publish to rf.detections topic only. -->
+
+  <device>
+    <rx_channels>1</rx_channels>
+    <!-- RTL-SDR stable rate. 3.2 MSPS possible but risks drops under CPU load -->
+    <sample_rate_sps>2400000</sample_rate_sps>
+    <rx_gain_db>30</rx_gain_db>
+    <bandwidth_hz>2400000</bandwidth_hz>
+  </device>
+
+  <sweep>
+    <start_hz>24000000</start_hz>      <!-- 24 MHz (RTL-SDR lower limit) -->
+    <stop_hz>1100000000</stop_hz>      <!-- 1.1 GHz — covers VHF/UHF/ADS-B -->
+    <!-- Smaller FFT = less CPU on Pi4 ARM Cortex-A72 -->
+    <dwell_samples>2048</dwell_samples>
+    <fft_size>2048</fft_size>
+    <usable_bw_fraction>0.80</usable_bw_fraction>
+    <threshold_db>12.0</threshold_db>
+    <min_signal_bw_hz>5000</min_signal_bw_hz>
+    <settle_samples>256</settle_samples>
+  </sweep>
+
+  <receiver>
+    <local_ip>127.0.0.1</local_ip>
+    <port>0</port>
+  </receiver>
+
+  <threat>
+    <enabled>false</enabled>
+    <gps_enabled>false</gps_enabled>
+  </threat>
+
+  <p25>
+    <enabled>false</enabled>
+    <grant_topic>rf.p25.grants</grant_topic>
+    <capture_s>3.0</capture_s>
+    <rank>3</rank>
+    <tg_whitelist></tg_whitelist>
+  </p25>
+
+</sdr_acquisition>

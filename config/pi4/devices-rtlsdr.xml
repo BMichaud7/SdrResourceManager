@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Pi4 device config — RTL-SDR Blog v3/v4 direct USB via SoapyRTLSDR.
+  Override at runtime: -v /path/to/devices-rtlsdr.xml:/etc/sdr-controller/devices.xml:ro,z
+-->
+<sdr_controller version="2.0">
+
+  <broker>
+    <url>amqp://localhost:5672</url>
+    <username>sdr_ctrl</username>
+    <password>sdr_hw_test</password>
+    <request_queue>sdr.task.request</request_queue>
+    <response_queue>sdr.task.response</response_queue>
+    <status_topic>sdr.status</status_topic>
+    <health_topic>sdr.health</health_topic>
+    <reconnect_interval_sec>3</reconnect_interval_sec>
+    <max_reconnect_interval_sec>30</max_reconnect_interval_sec>
+    <send_queue_depth>128</send_queue_depth>
+  </broker>
+
+  <policy>
+    <max_concurrent_tasks>8</max_concurrent_tasks>
+    <guard_band_hz>100000</guard_band_hz>
+    <usable_bw_fraction>0.80</usable_bw_fraction>
+    <default_task_timeout_ms>3600000</default_task_timeout_ms>
+    <scheduler_tick_ms>250</scheduler_tick_ms>
+    <watchdog_tick_ms>1000</watchdog_tick_ms>
+    <udp_port_pool_start>30000</udp_port_pool_start>
+    <udp_port_pool_end>30063</udp_port_pool_end>
+    <!-- RTL-SDR tops out at ~3.2 MSPS: keep packets small for standard MTU -->
+    <iq_packet_samples>183</iq_packet_samples>
+    <retune_conflict_policy>REJECT_NEW</retune_conflict_policy>
+    <heartbeat_interval_ms>30000</heartbeat_interval_ms>
+  </policy>
+
+  <devices>
+    <device id="rtlsdr-0">
+      <!-- SoapyRTLSDR: direct USB, no SoapyRemote needed -->
+      <driver>rtlsdr</driver>
+      <!-- Empty URI = auto-discover first RTL-SDR by USB serial.
+           Pin to a specific dongle: serial=00000001 -->
+      <uri></uri>
+      <label>RTL-SDR dongle 0</label>
+      <streaming_source_ip>127.0.0.1</streaming_source_ip>
+      <!-- RTL-SDR has one independently tunable channel -->
+      <shared_lo>false</shared_lo>
+      <capabilities>
+        <rx_channels>1</rx_channels>
+        <tx_channels>0</tx_channels>
+        <!-- RTL-SDR Blog v3: 500 kHz – 1.766 GHz (with Q-branch direct sampling below 24 MHz) -->
+        <freq_min_hz>24000000</freq_min_hz>
+        <freq_max_hz>1766000000</freq_max_hz>
+        <!-- Stable at 2.4 MSPS; 3.2 MSPS works but drops samples on busy Pi -->
+        <bandwidth_max_hz>2400000</bandwidth_max_hz>
+        <sample_rate_max_sps>2400000</sample_rate_max_sps>
+        <rx_gain_min_db>0</rx_gain_min_db>
+        <rx_gain_max_db>49</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>0</tx_atten_max_db>
+      </capabilities>
+    </device>
+  </devices>
+
+</sdr_controller>

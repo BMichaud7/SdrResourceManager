@@ -45,6 +45,8 @@ cd SdrResourceManager
 13. [Adding More SDR Boards](#13-adding-more-sdr-boards)
 14. [Example Workflow](#14-example-workflow)
 15. [Troubleshooting](#15-troubleshooting)
+16. [Pi4 / Embedded Deployment](#pi4--embedded-deployment)
+17. [Recon Container](#recon-container)
 
 ---
 
@@ -1055,6 +1057,146 @@ Monitor via health topic. If `temperature_c > 70°C`:
 - Reduce sample rate (lower power draw)
 - In Kubernetes, add a resource limit for CPU to prevent the FPGA from being
   driven too hard by concurrent tasks
+
+---
+
+## Pi4 / Embedded Deployment
+
+The `openrfstack-pi4` image is a minimal single-container stack designed for
+Raspberry Pi 4 (1 GB RAM) and other embedded ARM64 platforms. It replaces
+ActiveMQ Artemis and k3s with `qpid-dispatch-router` — a C-based AMQP 1.0
+router that uses ~20 MB RAM instead of ~800 MB for the JVM + k3s combination.
+
+### What runs inside
+
+| Service | Purpose |
+|---------|---------|
+| `qdrouterd` | AMQP 1.0 broker (balanced queues for tasks, multicast for detections/GPS) |
+| `sdr_controller` | SdrResourceManager — manages RTL-SDR via SoapyRTLSDR |
+| `sdr_acquisition` | Spectrum scanner — 24 MHz–1.1 GHz at 2.4 MSPS |
+| `gpsd` | GPS daemon (optional — only if /dev/ttyACM0 present) |
+| `sdr_gps` | GpsApp — publishes GPS fixes to `gps.location` AMQP topic |
+
+### Build
+
+```bash
+# All repos must be siblings under the same parent directory.
+# Build context is the parent dir so COPY can reach SdrSdk, SdrTaskApi, GpsApp, etc.
+cd /parent/of/all/repos
+
+podman build \
+  -f SdrResourceManager/Containerfile.pi4 \
+  -t openrfstack-pi4:latest \
+  --platform linux/arm64 \
+  .
+```
+
+### Run
+
+```bash
+podman compose -f SdrResourceManager/compose.pi4.yml up -d
+
+# Verify broker is up:
+nc -z localhost 5672 && echo "broker ready"
+
+# Watch detections:
+podman compose -f SdrResourceManager/compose.pi4.yml logs -f
+```
+
+Memory footprint at idle:
+
+| Component | RAM |
+|-----------|-----|
+| qdrouterd | ~20 MB |
+| sdr_controller | ~15 MB |
+| sdr_acquisition | ~120 MB (FFT buffers) |
+| sdr_gps | ~10 MB |
+| OS overhead | ~70 MB |
+| **Total** | **~235 MB** |
+
+### RTL-SDR udev rule (host)
+
+Run once on the Pi4 host before starting the container:
+
+```bash
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", MODE="0666"' \
+  | sudo tee /etc/udev/rules.d/99-rtlsdr.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+# Blacklist the kernel driver so SoapySDR has exclusive access:
+echo "blacklist dvb_usb_rtl28xxu" | sudo tee /etc/modprobe.d/blacklist-rtl.conf
+```
+
+---
+
+## Recon Container
+
+The `openrfstack-recon` image extends `openrfstack-pi4` with `sdr_recon.py` — a
+passive IQ recorder. It listens on `rf.detections`, and whenever a signal clears
+the SNR threshold it requests a full-bandwidth NARROWBAND capture and saves the IQ
+to disk with a JSON sidecar.
+
+### Use cases
+
+- Drive-by signal collection (drone, vehicle, backpack)
+- Building a labelled IQ dataset for classifier training
+- Capturing unknown signals for offline analysis
+
+### Startup
+
+Identical to Pi4 (`ENABLE_RECON=1` activates `sdr_recon.py` in the shared entrypoint):
+
+```
+qdrouterd → gpsd → sdr_controller → sdr_acquisition → sdr_recon.py → sdr_gps
+```
+
+### Build and run
+
+```bash
+# Build Pi4 image first (recon extends it)
+podman build -f SdrResourceManager/Containerfile.pi4  -t openrfstack-pi4:latest  --platform linux/arm64 .
+podman build -f SdrResourceManager/Containerfile.recon -t openrfstack-recon:latest --platform linux/arm64 .
+
+podman compose -f SdrResourceManager/compose.recon.yml up -d
+
+# Watch captures land:
+watch ls -lh /mnt/recon/
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RECON_SNR_MIN` | `15` | Minimum SNR (dB) to trigger a capture |
+| `RECON_CAPTURE_S` | `10` | Capture duration in seconds |
+| `RECON_GAIN` | `40` | RX gain for capture tasks (dB) |
+| `RECON_COOLDOWN` | `60` | Seconds before re-capturing same frequency |
+| `RECON_FORMAT` | `cf32` | Output format: `cf32`, `npz`, or `wav` |
+| `RECON_OUT` | `/recon` | Output directory (mount a USB drive here) |
+| `RECON_DB` | _(empty)_ | PostgreSQL connection string for `recon_captures` table |
+
+### Output files
+
+```
+20260616T123456Z_462.5500MHz_25kHz.cf32   ← interleaved float32 IQ
+20260616T123456Z_462.5500MHz_25kHz.json   ← metadata sidecar
+```
+
+JSON sidecar fields: `timestamp_iso`, `center_freq_hz`, `bandwidth_hz`, `sample_rate_sps`, `snr_db_trigger`, `power_db_trigger`, `rx_gain_db`, `num_samples`, `lat`, `lon`, `alt_m` (from GpsApp — null if no fix).
+
+### GPS coordinates
+
+GPS position is sourced exclusively from GpsApp (`gps.location` AMQP topic). `sdr_recon.py` subscribes to that topic and caches the latest fix. Each capture's JSON sidecar and `recon_captures` database row includes `lat/lon/alt_m` when a fix is available. If GpsApp is not running (no GPS dongle), the fields are null.
+
+### Load captures on a PC
+
+```python
+import numpy as np, json
+
+iq   = np.fromfile("20260616T123456Z_462.5500MHz_25kHz.cf32", dtype=np.complex64)
+meta = json.load(open("20260616T123456Z_462.5500MHz_25kHz.json"))
+print(f"freq={meta['center_freq_hz']/1e6:.4f} MHz  "
+      f"lat={meta.get('lat')}  lon={meta.get('lon')}")
+```
 
 ---
 

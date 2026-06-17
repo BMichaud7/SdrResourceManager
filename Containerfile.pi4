@@ -1,0 +1,188 @@
+# ════════════════════════════════════════════════════════════════════════
+#  Containerfile.pi4 — OpenRFStack lightweight image for Raspberry Pi 4
+#
+#  Combines SdrResourceManager + AcquisitionApp + GpsApp into one image.
+#  Replaces ActiveMQ Artemis (Java, ~300 MB) with Qpid Dispatch Router
+#  (C, ~20 MB) to fit comfortably within 1 GB RAM.
+#  No k3s — services run directly under tini.
+#
+#  Target hardware:
+#    Raspberry Pi 4 (arm64, 1–8 GB RAM)
+#    RTL-SDR Blog v3 or v4 via USB (direct SoapyRTLSDR, no SoapyRemote)
+#    Optional: USB GPS dongle at /dev/ttyACM0
+#
+#  Build (from parent directory containing all sibling repos):
+#    podman build \
+#      -f SdrResourceManager/Containerfile.pi4 \
+#      -t openrfstack-pi4:latest \
+#      --platform linux/arm64 \
+#      .
+#
+#  Run:
+#    podman run -d --name sdr-pi4 \
+#      --privileged \
+#      --network host \
+#      -v /dev/bus/usb:/dev/bus/usb \
+#      -v /dev/ttyACM0:/dev/ttyACM0 \       # GPS — omit if no GPS
+#      -v sdr-pi4-data:/var/lib/sdr \
+#      openrfstack-pi4:latest
+#
+#  Expected RAM: ~235 MB idle (vs ~950 MB for the k3s/Artemis mobile image)
+# ════════════════════════════════════════════════════════════════════════
+
+# ── Stage 1: Builder ──────────────────────────────────────────────────────
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        pkg-config \
+        git \
+        ca-certificates \
+        # SoapySDR + RTL-SDR driver (direct USB, no SoapyRemote)
+        libsoapysdr-dev \
+        librtlsdr-dev \
+        # AMQP 1.0
+        libqpid-proton-cpp12-dev \
+        # XML
+        libtinyxml2-dev \
+        # JSON
+        nlohmann-json3-dev \
+        # Logging
+        libspdlog-dev \
+        libfmt-dev \
+        # DSP
+        libfftw3-dev \
+        # UUID
+        uuid-dev \
+        # DB client (libpqxx compile-time only; no postgres server at runtime)
+        libpqxx-dev \
+        # GPS
+        libgps-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Clone shared SDR libraries ─────────────────────────────────────────────
+RUN git clone --depth 1 --branch "main/1.0" \
+        https://github.com/BMichaud7/SdrTaskApi.git /workspace/SdrTaskApi && \
+    git clone --depth 1 --branch "main/1.0" \
+        https://github.com/BMichaud7/SdrSdk.git /workspace/SdrSdk
+
+# ── Build SoapyRTLSDR module ───────────────────────────────────────────────
+RUN git clone --depth 1 \
+        https://github.com/pothosware/SoapyRTLSDR.git /tmp/SoapyRTLSDR && \
+    cmake -S /tmp/SoapyRTLSDR -B /tmp/SoapyRTLSDR/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build /tmp/SoapyRTLSDR/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapyRTLSDR/build && \
+    rm -rf /tmp/SoapyRTLSDR
+
+# ── Build SdrResourceManager (sdr_controller) ─────────────────────────────
+COPY SdrResourceManager/ /workspace/SdrResourceManager/
+RUN cmake -S /workspace/SdrResourceManager \
+          -B /workspace/SdrResourceManager/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/install \
+        -DBUILD_TESTING=OFF \
+    && cmake --build /workspace/SdrResourceManager/build --parallel "$(nproc)" \
+    && cmake --install /workspace/SdrResourceManager/build
+
+# ── Build AcquisitionApp (sdr_acquisition) ────────────────────────────────
+COPY AcquisitionApp/ /workspace/AcquisitionApp/
+RUN cmake -S /workspace/AcquisitionApp \
+          -B /workspace/AcquisitionApp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/install \
+        -DBUILD_TESTING=OFF \
+        -DWITH_DB=ON \
+        -DFETCHCONTENT_QUIET=OFF \
+    && cmake --build /workspace/AcquisitionApp/build --parallel "$(nproc)" \
+    && cmake --install /workspace/AcquisitionApp/build
+
+# ── Build GpsApp (sdr_gps) ────────────────────────────────────────────────
+COPY GpsApp/ /workspace/GpsApp/
+RUN cmake -S /workspace/GpsApp \
+          -B /workspace/GpsApp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/install \
+    && cmake --build /workspace/GpsApp/build --parallel "$(nproc)" \
+    && cmake --install /workspace/GpsApp/build
+
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────
+FROM ubuntu:24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        # Lightweight AMQP 1.0 broker (C, ~20 MB RAM — replaces Artemis JVM)
+        qpid-dispatch-router \
+        # SDR
+        libsoapysdr0.8 \
+        librtlsdr2 \
+        # AMQP runtime
+        libqpid-proton-cpp12 \
+        # App libs
+        libtinyxml2-10 \
+        libspdlog1.12 \
+        libfmt9 \
+        libfftw3-single3 \
+        uuid-runtime \
+        libpqxx-7.8t64 \
+        libpq5 \
+        # GPS
+        gpsd \
+        gpsd-clients \
+        libgps30t64 \
+        # Utilities
+        tini \
+        netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── SoapyRTLSDR module (built from source in builder stage) ───────────────
+COPY --from=builder /usr/local/lib/SoapySDR /usr/local/lib/SoapySDR
+COPY --from=builder /usr/local/lib/libSoapySDR* /usr/local/lib/
+
+# ── Application binaries ───────────────────────────────────────────────────
+COPY --from=builder /install/bin/sdr_controller  /usr/local/bin/sdr_controller
+COPY --from=builder /install/bin/sdr_client      /usr/local/bin/sdr_client
+COPY --from=builder /install/bin/sdr_acquisition /usr/local/bin/sdr_acquisition
+COPY --from=builder /install/bin/sdr_gps         /usr/local/bin/sdr_gps
+
+# ── Default configs ────────────────────────────────────────────────────────
+COPY --from=builder /install/etc/sdr-controller  /etc/sdr-controller
+COPY --from=builder /install/etc/sdr-acquisition /etc/sdr-acquisition
+
+COPY SdrResourceManager/config/pi4/devices-rtlsdr.xml /etc/sdr-controller/devices.xml
+COPY SdrResourceManager/config/pi4/scanner-pi4.xml    /etc/sdr-acquisition/scanner.xml
+COPY SdrResourceManager/config/pi4/gps-pi4.xml        /etc/sdr-gps/gps.xml
+COPY SdrResourceManager/config/pi4/qdrouterd.conf     /etc/qdrouterd/qdrouterd.conf
+COPY SdrResourceManager/config/pi4/entrypoint-pi4.sh  /usr/local/bin/entrypoint-pi4.sh
+
+RUN chmod +x /usr/local/bin/entrypoint-pi4.sh && \
+    ldconfig /usr/local/lib && \
+    # GPS fix log directory
+    mkdir -p /var/lib/sdr/gps && \
+    # FFTW wisdom cache
+    mkdir -p /var/cache/sdr-acquisition && \
+    # Config override mount points
+    mkdir -p /etc/sdr-gps && \
+    # Non-root user for app processes
+    groupadd -r sdr && useradd -r -g sdr -s /sbin/nologin sdr && \
+    chown -R sdr:sdr /var/lib/sdr /var/cache/sdr-acquisition \
+                     /etc/sdr-controller /etc/sdr-acquisition /etc/sdr-gps
+
+# ── RTL-SDR udev — container runs with --privileged so no udev rules needed,
+#    but document the host-side rule for reference:
+#    SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", MODE="0666", GROUP="plugdev"
+
+ENV SDR_LOG_LEVEL=info
+ENV GPS_DEVICE=/dev/ttyACM0
+
+# tini as PID 1 — reaps zombie child processes, forwards signals
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/entrypoint-pi4.sh"]

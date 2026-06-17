@@ -1,0 +1,79 @@
+---
+# compose.recon.yml — OpenRFStack passive recon stack for Pi4
+#
+# Sweep + detect + auto-capture 10 s IQ on any signal above SNR threshold.
+# Mount /recon to a USB drive or NFS share; pull files to PC for analysis.
+#
+# Build:
+#   podman compose -f compose.recon.yml build
+#
+# Run:
+#   podman compose -f compose.recon.yml up -d
+#
+# Watch captures landing:
+#   watch ls -lh /mnt/usb/recon/
+#
+# Load on PC:
+#   import numpy as np
+#   iq = np.fromfile("20260616T123456Z_462.5500MHz_25kHz.cf32", dtype=np.complex64)
+
+services:
+  sdr-recon:
+    build:
+      context: ..
+      dockerfile: SdrResourceManager/Containerfile.recon
+      platforms:
+        - linux/arm64
+    image: openrfstack-recon:latest
+    container_name: sdr-recon
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      # GPS dongle — omit if not present
+      - /dev/ttyACM0:/dev/ttyACM0
+      # IQ capture output — point to USB drive or NFS for large captures
+      - /mnt/recon:/recon
+      # Persistent GPS log
+      - sdr-recon-gps:/var/lib/sdr/gps
+      # FFTW wisdom cache
+      - sdr-recon-fftw:/var/cache/sdr-acquisition
+
+    environment:
+      SDR_LOG_LEVEL: info
+      GPS_DEVICE: /dev/ttyACM0
+
+      # ── Recon tuning ──────────────────────────────────────────────────
+      # Minimum SNR (dB) to trigger a capture. Lower = more false positives.
+      RECON_SNR_MIN: "15"
+      # How long to record per capture (seconds)
+      RECON_CAPTURE_S: "10"
+      # RX gain for capture tasks (dB). 40 suits RTL-SDR at VHF/UHF.
+      RECON_GAIN: "40"
+      # Minimum seconds before re-capturing the same frequency
+      RECON_COOLDOWN: "60"
+      # Output format: cf32 (default), npz, wav
+      # cf32 → inspectrum / gqrx / numpy; wav → Audacity / SDR#
+      RECON_FORMAT: "cf32"
+      # Where captures land inside the container
+      RECON_OUT: "/recon"
+
+    deploy:
+      resources:
+        limits:
+          memory: 640M    # extra 128 MB vs pi4 for IQ buffers during capture
+        reservations:
+          memory: 128M
+
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "5672"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  sdr-recon-gps:
+  sdr-recon-fftw:

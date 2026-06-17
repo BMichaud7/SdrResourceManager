@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Pi4 GpsApp config — reads from gpsd running on the same container.
+  gpsd is started by the entrypoint script if /dev/ttyACM0 exists.
+  Override at runtime: -v /path/to/gps-pi4.xml:/etc/sdr-gps/gps.xml:ro,z
+-->
+<gps_logger>
+
+  <broker>
+    <url>amqp://localhost:5672</url>
+    <username>sdr_ctrl</username>
+    <password>sdr_hw_test</password>
+    <topic>gps.location</topic>
+  </broker>
+
+  <gpsd>
+    <host>localhost</host>
+    <port>2947</port>
+  </gpsd>
+
+  <logging>
+    <fix_log>/var/lib/sdr/gps/fixes.jsonl</fix_log>
+    <publish_interval_ms>1000</publish_interval_ms>
+    <min_fix_mode>2</min_fix_mode>
+    <device_id>sdr-pi4</device_id>
+  </logging>
+
+</gps_logger>
