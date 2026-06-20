@@ -31,12 +31,28 @@ bool RadioDevice::open() {
         args["driver"] = cfg_.driver;
         // SoapyRemote uses key "remote" for the host:port; all other drivers
         // use "uri" (libiio convention: "ip:192.168.1.x", "usb:X.Y.Z", etc.)
-        // Omit uri when empty — lets the driver auto-discover (e.g. SoapyPlutoSDR USB scan).
-        if (cfg_.driver == "remote")
+        if (cfg_.driver == "remote") {
             args["remote"] = cfg_.uri;
-        else if (!cfg_.uri.empty())
+        } else if (!cfg_.uri.empty()) {
             args["uri"] = cfg_.uri;
-        spdlog::info("[{}] Opening: driver={} uri={}", cfg_.id, cfg_.driver, cfg_.uri);
+        } else {
+            // No uri configured — ask the driver to find itself instead of us
+            // having to hand-maintain a device's address in devices.xml.
+            // SoapyPlutoSDR's registered find function (and any other driver's)
+            // tries USB scan, then zeroconf, then a PLUTO_IP env var fallback
+            // before giving up; Device::make() alone skips all of that and
+            // goes straight to iio_create_default_context(), which only finds
+            // a USB-attached device.
+            auto found = SoapySDR::Device::enumerate(args);
+            if (!found.empty()) {
+                args = found.front();
+                spdlog::info("[{}] Discovered via enumerate(): {}", cfg_.id,
+                             args.count("label") ? args.at("label")
+                             : args.count("uri") ? args.at("uri") : "?");
+            }
+        }
+        spdlog::info("[{}] Opening: driver={} uri={}", cfg_.id, cfg_.driver,
+                     args.count("uri") ? args.at("uri") : cfg_.uri);
         dev_ = SoapySDR::Device::make(args);
         if (!dev_) { spdlog::error("[{}] make() returned nullptr", cfg_.id); return false; }
 
