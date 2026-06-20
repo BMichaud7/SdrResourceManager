@@ -44,12 +44,28 @@ bool RadioDevice::open() {
             // goes straight to iio_create_default_context(), which only finds
             // a USB-attached device.
             auto found = SoapySDR::Device::enumerate(args);
-            if (!found.empty()) {
-                args = found.front();
-                spdlog::info("[{}] Discovered via enumerate(): {}", cfg_.id,
-                             args.count("label") ? args.at("label")
-                             : args.count("uri") ? args.at("uri") : "?");
+            // enumerate() can return multiple matches of the same driver (e.g.
+            // two Plutos) -- pick the first one no other RadioDevice instance
+            // has already claimed, so two devices.xml entries with empty uri
+            // don't both grab the same physical unit.
+            std::lock_guard<std::mutex> claim_lock(claimMutex());
+            for (auto& candidate : found) {
+                std::string key = candidate.count("uri")      ? candidate.at("uri")
+                                 : candidate.count("hostname") ? candidate.at("hostname")
+                                 : candidate.count("serial")   ? candidate.at("serial")
+                                 : candidate.count("label")    ? candidate.at("label")
+                                 : std::string();
+                if (key.empty() || claimedUris().count(key)) continue;
+                args = candidate;
+                claimed_key_ = key;
+                claimedUris().insert(key);
+                spdlog::info("[{}] Discovered via enumerate(): {}", cfg_.id, key);
+                break;
             }
+            if (claimed_key_.empty() && !found.empty())
+                spdlog::warn("[{}] enumerate() found {} candidate(s) but all are "
+                             "already claimed by other configured devices",
+                             cfg_.id, found.size());
         }
         spdlog::info("[{}] Opening: driver={} uri={}", cfg_.id, cfg_.driver,
                      args.count("uri") ? args.at("uri") : cfg_.uri);
@@ -88,7 +104,22 @@ void RadioDevice::close() {
     if (!online_) return;
     if (dev_) { SoapySDR::Device::unmake(dev_); dev_=nullptr; }
     online_.store(false, std::memory_order_release);
+    if (!claimed_key_.empty()) {
+        std::lock_guard<std::mutex> claim_lock(claimMutex());
+        claimedUris().erase(claimed_key_);
+        claimed_key_.clear();
+    }
     spdlog::info("[{}] Closed", cfg_.id);
+}
+
+std::mutex& RadioDevice::claimMutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::set<std::string>& RadioDevice::claimedUris() {
+    static std::set<std::string> s;
+    return s;
 }
 
 bool RadioDevice::tune(double cf_hz, double sr_sps) {

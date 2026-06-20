@@ -30,6 +30,7 @@ Contact author for permission: https://github.com/OpenRFStack
 #include <SoapySDR/Device.hpp>
 #include <atomic>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -166,6 +167,14 @@ private:
     mutable std::mutex mu_;
     double current_cf_   = 0.0;
     double current_rate_ = 0.0;
+
+    // Identifier (uri/hostname/serial/label) claimed via Device::enumerate()
+    // when devices.xml leaves <uri> empty, so a second RadioDevice instance
+    // of the same driver doesn't grab the same physical unit. Empty when
+    // this device was opened with an explicit uri instead of discovery.
+    std::string claimed_key_;
+    static std::mutex&            claimMutex();
+    static std::set<std::string>& claimedUris();
 };
 
 } // namespace sdr
