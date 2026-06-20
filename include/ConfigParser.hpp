@@ -60,6 +60,13 @@ struct DeviceConfig {
     // decimate.  Eliminates the 3-4 s AD9361 BB-filter recalibration that fires
     // on every setSampleRate() call.
     double fixed_sample_rate_hz = 0.0;
+    // true  = let the SDR driver's hardware AGC pick gain per-channel
+    //         (SoapySDR setGainMode) — best for varying/unknown signal
+    //         strength (field/mobile/recon deployments).
+    // false = fixed manual gain at rx_gain_db (default — repeatable,
+    //         deterministic for fixed-site/lab use).
+    bool   rx_agc      = false;
+    double rx_gain_db  = 30.0;
 };
 
 struct BrokerConfig {

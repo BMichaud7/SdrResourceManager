@@ -1307,7 +1307,8 @@ void ResourceManager::activateTask(const std::string& task_id) {
                     deactivateTask(task_id, TaskState::FAILED,
                                    "Tune failed on " + alloc.device_id); return;
                 }
-                for (int ch : alloc.rx_channels) dev->setRxGain(ch, 30.0, false);
+                for (int ch : alloc.rx_channels)
+                    dev->setRxGain(ch, dev->config().rx_gain_db, dev->config().rx_agc);
 
                 SoapySDR::Stream* s = dev->openRxStream(alloc.rx_channels);
                 if (!s) {
@@ -1362,7 +1363,7 @@ void ResourceManager::activateTask(const std::string& task_id) {
                     deactivateTask(task_id, TaskState::FAILED,
                                    "tuneChannel failed ch="+std::to_string(ch)); return;
                 }
-                dev->setRxGain(ch, 30.0, false);
+                dev->setRxGain(ch, dev->config().rx_gain_db, dev->config().rx_agc);
 
                 SoapySDR::Stream* s = dev->openRxStream({ch});
                 if (!s) {

@@ -116,6 +116,9 @@ AppConfig ConfigParser::parse(const std::string& path) {
         dc.caps.tx_atten_min_db     = optD(c,"tx_atten_min_db",0.0);
         dc.caps.tx_atten_max_db     = optD(c,"tx_atten_max_db",89.0);
         dc.fixed_sample_rate_hz     = optD(d,"fixed_sample_rate_hz", 0.0);
+        { std::string agc = opt(d,"rx_agc","false");
+          dc.rx_agc = (agc == "true" || agc == "1"); }
+        dc.rx_gain_db               = optD(d,"rx_gain_db", 30.0);
         cfg.devices.push_back(std::move(dc));
     }
     if (cfg.devices.empty())

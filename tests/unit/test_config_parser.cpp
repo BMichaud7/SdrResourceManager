@@ -253,6 +253,34 @@ TEST(ConfigParser, DeviceFreqRangeParsed) {
     EXPECT_DOUBLE_EQ(cfg.devices[0].caps.freq_max_hz,  6000e6);
 }
 
+TEST(ConfigParser, RxAgcDefaultsToFalseWithManualGain) {
+    // kSingleDeviceXml has no <rx_agc>/<rx_gain_db> elements.
+    auto cfg = ConfigParser::parse(writeTmp(kSingleDeviceXml));
+    ASSERT_EQ(cfg.devices.size(), 1u);
+    EXPECT_FALSE(cfg.devices[0].rx_agc);
+    EXPECT_DOUBLE_EQ(cfg.devices[0].rx_gain_db, 30.0);
+}
+
+TEST(ConfigParser, RxAgcAndGainParsedWhenPresent) {
+    static const std::string kXml = R"xml(<?xml version="1.0"?>
+<sdr_controller version="2.0">
+  <broker><url>amqp://broker:5672</url></broker>
+  <devices>
+    <device id="dev-agc">
+      <driver>null</driver>
+      <rx_agc>true</rx_agc>
+      <rx_gain_db>42.5</rx_gain_db>
+      <capabilities><rx_channels>1</rx_channels><tx_channels>0</tx_channels></capabilities>
+    </device>
+  </devices>
+</sdr_controller>
+)xml";
+    auto cfg = ConfigParser::parse(writeTmp(kXml));
+    ASSERT_EQ(cfg.devices.size(), 1u);
+    EXPECT_TRUE(cfg.devices[0].rx_agc);
+    EXPECT_DOUBLE_EQ(cfg.devices[0].rx_gain_db, 42.5);
+}
+
 /*
 ========================================================================
 End of file — OpenRFStack
