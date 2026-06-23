@@ -84,6 +84,16 @@ private:
     void watchdogLoop();
     void heartbeatLoop();
 
+    // Sleeps in short increments, re-checking running_ between each one, so
+    // a tick thread notices shutdown within ~100ms instead of up to its full
+    // tick/interval duration. heartbeat_interval_ms defaults to 30s in
+    // deployed configs — without this, stop()'s heartbeat_thread_.join()
+    // (called before AMQP/device teardown) could block the whole shutdown
+    // path for up to 30s, blowing past any orchestrator SIGTERM grace period
+    // and forcing a SIGKILL. Confirmed live on the Pi.
+    // Returns false if interrupted early by running_ becoming false.
+    bool sleepResponsive(int total_ms);
+
     void handleTaskRequest(const TaskRequest& req, const std::string& reply_to);
     void handleTaskStop(const TaskRequest& req,    const std::string& reply_to);
     void handleTaskCancel(const TaskRequest& req,  const std::string& reply_to);

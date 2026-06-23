@@ -14,20 +14,28 @@ Contact author for permission: https://github.com/OpenRFStack
 #include "Controller.hpp"
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <atomic>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 
 namespace {
-    std::atomic<bool>               g_shutdown{false};
-    sdr::Controller*                g_ctrl = nullptr;
+    // Signal handlers may only call async-signal-safe functions. A plain
+    // atomic store is safe; spdlog::warn() (heap alloc + internal locking)
+    // and Controller::stop() (joins threads, takes mutexes) are NOT.
+    // Calling them directly from the handler — as this used to do — can
+    // self-deadlock if the interrupted thread already holds one of those
+    // locks (e.g. mid-malloc during routine logging), leaving the process
+    // unresponsive to SIGTERM and requiring a hard SIGKILL. Confirmed live
+    // on the Pi: `podman stop` on sdr_controller against a real RTL-SDR
+    // consistently hung past the stop timeout and needed SIGKILL.
+    std::atomic<bool> g_shutdown_requested{false};
 
-    void signalHandler(int sig) {
-        spdlog::warn("Signal {} received — shutting down", sig);
-        g_shutdown.store(true);
-        if (g_ctrl) g_ctrl->stop();
+    void signalHandler(int) {
+        g_shutdown_requested.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -70,11 +78,19 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Run controller ────────────────────────────────────────────────
+    // ctrl.run() blocks the calling thread, so it runs on its own thread
+    // here, leaving main() free to poll g_shutdown_requested and call
+    // ctrl.stop() from ordinary (non-signal) context once it's set.
     try {
         sdr::Controller ctrl(cfg);
-        g_ctrl = &ctrl;
-        ctrl.run();
-        g_ctrl = nullptr;
+        std::thread runner([&ctrl] { ctrl.run(); });
+
+        while (!g_shutdown_requested.load(std::memory_order_relaxed))
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        spdlog::warn("Signal received — shutting down");
+        ctrl.stop();
+        runner.join();
     } catch (const std::exception& ex) {
         spdlog::critical("Controller fatal error: {}", ex.what());
         return EXIT_FAILURE;

@@ -145,6 +145,7 @@ void AmqpClient::start() {
         catch (const std::exception& ex) {
             spdlog::error("AmqpClient: container run exception: {}", ex.what());
         }
+        container_stopped_.store(true);
     });
     spdlog::info("AmqpClient: started, connecting to {}", cfg_.url);
 }
@@ -152,7 +153,29 @@ void AmqpClient::start() {
 void AmqpClient::stop() {
     if (!running_.exchange(false)) return;
     try { container_->stop(); } catch(...) {}
-    if (container_thread_.joinable()) container_thread_.join();
+    if (container_thread_.joinable()) {
+        // container::stop() doesn't reliably cancel a pending reconnect
+        // backoff timer (qpid-proton C++ binding) — if the broker is
+        // unreachable right when stop() is called, container_->run() can
+        // keep sleeping through its current retry delay before noticing the
+        // stop request. With reconnect_options(max_attempts=0) (deliberate,
+        // for resilience against a broker that isn't up yet) that delay can
+        // be the full max_reconnect_interval_sec. Don't block the whole
+        // shutdown path on it — give it a short grace period and detach
+        // rather than join if it's still not done; the OS reclaims the
+        // thread when the process exits regardless. Confirmed live: without
+        // this, `podman stop` on sdr_controller against a real RTL-SDR with
+        // no broker present always hit the stop timeout and needed SIGKILL.
+        for (int i = 0; i < 30 && !container_stopped_.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (container_stopped_.load()) {
+            container_thread_.join();
+        } else {
+            spdlog::warn("AmqpClient: proton thread still in reconnect "
+                         "backoff after grace period — detaching");
+            container_thread_.detach();
+        }
+    }
     spdlog::info("AmqpClient: stopped");
 }
 

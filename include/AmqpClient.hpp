@@ -73,6 +73,10 @@ private:
     std::thread container_thread_;
     std::atomic<bool> connected_{false};
     std::atomic<bool> running_  {false};
+    // Set by the container_thread_ lambda itself right before it returns —
+    // lets stop() decide join() vs. detach() without ever calling both on
+    // the same std::thread concurrently (see stop()'s comment).
+    std::atomic<bool> container_stopped_{false};
 
     friend class Handler;
     void onConnected();

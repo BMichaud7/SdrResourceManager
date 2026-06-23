@@ -12,6 +12,7 @@ Contact author for permission: https://github.com/OpenRFStack
 */
 #include "Controller.hpp"
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <thread>
@@ -144,24 +145,32 @@ void Controller::onTaskStateChanged(const TaskRecord& rec) {
 }
 
 // ── Background threads ───────────────────────────────────────────────────
+bool Controller::sleepResponsive(int total_ms) {
+    const int step_ms = 100;
+    for (int slept = 0; slept < total_ms; slept += step_ms) {
+        if (!running_.load()) return false;
+        std::this_thread::sleep_for(milliseconds(std::min(step_ms, total_ms - slept)));
+    }
+    return running_.load();
+}
+
 void Controller::schedulerLoop() {
     while (running_.load()) {
-        std::this_thread::sleep_for(milliseconds(cfg_.policy.scheduler_tick_ms));
-        if (running_.load()) rm_->schedulerTick();
+        if (!sleepResponsive(cfg_.policy.scheduler_tick_ms)) break;
+        rm_->schedulerTick();
     }
 }
 
 void Controller::watchdogLoop() {
     while (running_.load()) {
-        std::this_thread::sleep_for(milliseconds(cfg_.policy.watchdog_tick_ms));
-        if (running_.load()) rm_->watchdogTick();
+        if (!sleepResponsive(cfg_.policy.watchdog_tick_ms)) break;
+        rm_->watchdogTick();
     }
 }
 
 void Controller::heartbeatLoop() {
     while (running_.load()) {
-        std::this_thread::sleep_for(milliseconds(cfg_.policy.heartbeat_interval_ms));
-        if (!running_.load()) break;
+        if (!sleepResponsive(cfg_.policy.heartbeat_interval_ms)) break;
 
         auto devs = rm_->deviceSummaries();
         std::vector<MessageCodec::DevHealthEntry> entries;
