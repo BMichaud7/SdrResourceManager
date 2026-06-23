@@ -111,6 +111,7 @@ AppConfig ConfigParser::parse(const std::string& path) {
         dc.caps.freq_max_hz         = optD(c,"freq_max_hz",6e9);
         dc.caps.bandwidth_max_hz    = optD(c,"bandwidth_max_hz",56e6);
         dc.caps.sample_rate_max_sps = optD(c,"sample_rate_max_sps",61.44e6);
+        dc.caps.sample_rate_min_sps = optD(c,"sample_rate_min_sps",0.0);
         dc.caps.rx_gain_min_db      = optD(c,"rx_gain_min_db",-3.0);
         dc.caps.rx_gain_max_db      = optD(c,"rx_gain_max_db",71.0);
         dc.caps.tx_atten_min_db     = optD(c,"tx_atten_min_db",0.0);

@@ -35,6 +35,15 @@ struct DeviceCapabilities {
     double freq_max_hz         = 6e9;       // AD9361/HackRF upper bound
     double bandwidth_max_hz    = 56e6;      // AD9361; LimeSDR goes to 130 MHz
     double sample_rate_max_sps = 61.44e6;   // AD9361; LimeSDR/USRP N-series go higher
+    // Lowest rate the hardware ADC/driver can actually be set to (0 = no known
+    // floor). Many SDRs reject low rates that digital-protocol/narrowband demod
+    // tasks request (e.g. RTL-SDR's RTL2832U rejects anything below ~225,001 Hz).
+    // Requests below this are NOT rejected: findBestDevice acquires at an integer
+    // multiple of the requested rate that clears the floor, and the controller
+    // decimates back down via Ddc before streaming — transparent to the client.
+    // Populated by configure_devices.py's device probe (SoapySDRUtil --probe's
+    // "Sample rates:" line) or left at 0 to fall back to today's behaviour.
+    double sample_rate_min_sps = 0.0;
     double rx_gain_min_db      = -3.0;
     double rx_gain_max_db      = 71.0;
     double tx_atten_min_db     = 0.0;

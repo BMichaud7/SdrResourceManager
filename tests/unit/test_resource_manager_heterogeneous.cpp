@@ -22,6 +22,7 @@ Contact author for permission: https://github.com/OpenRFStack
 #include "sdr/Types.hpp"
 #include "sdr/MessageCodec.hpp"
 #include "FakeSoapyControl.hpp"
+#include <cmath>
 #include <set>
 #include <string>
 
@@ -85,6 +86,8 @@ static AppConfig makeMixedConfig() {
         dc.caps.freq_max_hz         = 1.766e9;
         dc.caps.bandwidth_max_hz    = 3.2e6;
         dc.caps.sample_rate_max_sps = 3.2e6;
+        // Real RTL2832U hardware rejects setSampleRate() below ~225,001 Hz.
+        dc.caps.sample_rate_min_sps = 225001;
         dc.caps.rx_gain_min_db      = 0;
         dc.caps.rx_gain_max_db      = 49.6;
         dc.caps.tx_atten_min_db     = 0;
@@ -184,6 +187,29 @@ TEST(MixedPool, BothRtlSdrsAcceptSingleChannelTask) {
     }
     EXPECT_EQ(devs.size(), 2u);
     for (const auto& d : devs) EXPECT_EQ(d.rfind("rtlsdr-", 0), 0u);
+}
+
+// FM_NB-class request (50 kHz) is well below RTL-SDR's ~225,001 Hz hardware
+// floor. Must be ACCEPTED — not rejected — by acquiring at an integer
+// multiple of the requested rate that clears the floor; the DDC decimates
+// back down to what was asked for transparently (see ResourceManager.cpp's
+// findBestDevice + activateTask's tuneChannel/independent-LO branch).
+TEST(MixedPool, RtlSdrClampsBelowFloorRateInsteadOfRejecting) {
+    FakeSoapy::reset();
+    ResourceManager rm(makeMixedConfig(), [](const TaskRecord&){}, [](const auto&,const auto&){});
+    ASSERT_EQ(rm.openDevices(), 6);
+
+    auto resp = rm.tryAccept(makeContinuousRequest(
+        "rtl-fm-nb", 100e6, 25e3, 50e3, /*rx*/1, /*tx*/0, /*rank*/1, "rtlsdr-0"));
+    ASSERT_TRUE(resp.accepted) << "rejected: " << resp.reject_reason;
+    ASSERT_FALSE(resp.streams.empty());
+
+    double acquired = resp.streams[0].sample_rate_sps;
+    EXPECT_GE(acquired, 225001.0) << "device must be acquiring at/above its floor";
+    // Must be an exact integer multiple of the requested rate so the Ddc
+    // hands back precisely 50kHz, not an approximation.
+    double ratio = acquired / 50e3;
+    EXPECT_NEAR(ratio, std::round(ratio), 1e-6);
 }
 
 // An RTL-SDR-only pool, used to confirm the device class's own capability

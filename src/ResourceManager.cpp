@@ -181,8 +181,21 @@ ResourceManager::findBestDevice(double cf, double bw, double sr,
         if (rx > caps.rx_channels) continue;
         if (tx > caps.tx_channels) continue;
 
+        // Below the device's hardware floor (e.g. RTL-SDR rejects <225,001 Hz)?
+        // Acquire at the smallest integer multiple of the requested rate that
+        // clears the floor — activateTask then applies Ddc decimation so the
+        // client still gets exactly the rate it asked for. Skip this device
+        // if no such multiple fits under sample_rate_max_sps.
+        double dev_sr = sr;
+        if (caps.sample_rate_min_sps > 0.0 && sr > 0.0 && sr < caps.sample_rate_min_sps) {
+            int decim = (int)std::ceil(caps.sample_rate_min_sps / sr);
+            if (decim < 1) decim = 1;
+            dev_sr = sr * decim;
+            if (caps.sample_rate_max_sps > 0.0 && dev_sr > caps.sample_rate_max_sps) continue;
+        }
+
         auto fit = timelines_.at(id)->canFit(
-            t_start, t_stop, cf, bw, sr, rx, tx,
+            t_start, t_stop, cf, bw, dev_sr, rx, tx,
             caps.rx_channels, caps.tx_channels,
             cfg_.policy.guard_band_hz,
             dev->config().shared_lo,
@@ -1356,6 +1369,17 @@ void ResourceManager::activateTask(const std::string& task_id) {
             }
         } else {
             // Each channel has its own LO and its own SoapySDR stream.
+            // Device acquires at alloc.sample_rate_sps, which findBestDevice
+            // clamps up to the device's hardware floor (sample_rate_min_sps)
+            // when the task asked for less. When that differs from what was
+            // actually requested, stream via DDC instead of raw fan-out so
+            // narrowband/digital-protocol tasks below the floor (e.g. FM_NB
+            // or P25/DMR demod on RTL-SDR) still get decimated down to the
+            // requested rate — transparent to the client.
+            bool needs_ddc = alloc.output_sample_rate_sps > 0.0 &&
+                std::abs(alloc.output_sample_rate_sps - alloc.sample_rate_sps) > 1.0;
+            double task_cf = (alloc.slice_lo_hz + alloc.slice_hi_hz) / 2.0;
+
             for (int i=0; i<(int)alloc.rx_channels.size(); ++i) {
                 int ch = alloc.rx_channels[i];
                 if (!dev->tuneChannel(ch, alloc.center_freq_hz, alloc.sample_rate_sps)) {
@@ -1383,8 +1407,14 @@ void ResourceManager::activateTask(const std::string& task_id) {
                 sc.task_id       = task_id;
                 sc.stream_id     = makeStreamId(task_id,"RX",alloc.device_id,ch);
                 sc.channel_index = ch;
-                sc.dest_ip       = streaming.dest_ip;
-                sc.dest_port     = alloc.udp_ports[static_cast<size_t>(i)];
+                // DDC case: the sub-band consumer (added below) is the real
+                // destination — leave dest_ip/port unset so IQStreamer::start()
+                // doesn't also register the task's UDP port as a second,
+                // un-decimated raw dest.
+                if (!needs_ddc) {
+                    sc.dest_ip   = streaming.dest_ip;
+                    sc.dest_port = alloc.udp_ports[static_cast<size_t>(i)];
+                }
                 sc.packet_samples= cfg_.policy.iq_packet_samples;
                 sc.task_start_ms = rec.start_time_ms;
                 sc.sample_rate   = alloc.sample_rate_sps;
@@ -1392,6 +1422,18 @@ void ResourceManager::activateTask(const std::string& task_id) {
                 streamer->updateCenterFreq(alloc.center_freq_hz);
                 streamer->start();
                 rt.streamers.push_back(streamer);
+
+                if (needs_ddc) {
+                    streamer->addSubBand(
+                        task_id, makeStreamId(task_id,"RX",alloc.device_id,ch), ch,
+                        streaming.dest_ip, alloc.udp_ports[static_cast<size_t>(i)],
+                        task_cf, alloc.output_sample_rate_sps, alloc.sample_rate_sps);
+                    rt.is_subband_consumer = true;
+                    spdlog::info("activateTask [{}] DDC sub-band ch={} on {} cf={:.3f}MHz "
+                                 "sr={:.3f}MSPS (acquired {:.3f}MSPS)",
+                                 task_id, ch, alloc.device_id, task_cf / 1e6,
+                                 alloc.output_sample_rate_sps / 1e6, alloc.sample_rate_sps / 1e6);
+                }
             }
         }
     }
