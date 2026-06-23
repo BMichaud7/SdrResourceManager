@@ -166,9 +166,32 @@ target_compile_definitions(sdr_controller PRIVATE
 # ── Client ────────────────────────────────────────────────────────────────────
 add_subdirectory(client)
 
+# ── Hardware verification tool (opt-in, not part of any shipped image) ───────
+# Calls ResourceManager directly — no AMQP broker needed — to confirm a
+# sub-floor sample-rate request is accepted and actually decimated on real
+# hardware. See tools/verify_rtlsdr.cpp.
+option(BUILD_VERIFY_TOOL "Build sdr_verify_rtlsdr standalone hw verification tool" OFF)
+if(BUILD_VERIFY_TOOL)
+    list(REMOVE_ITEM CONTROLLER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
+    add_executable(sdr_verify_rtlsdr ${CONTROLLER_SOURCES} tools/verify_rtlsdr.cpp)
+    target_include_directories(sdr_verify_rtlsdr PRIVATE
+        include ${SoapySDR_INCLUDE_DIRS} ${PROTON_INCLUDE_DIRS}
+        ${TINYXML2_INCLUDE_DIRS} ${FFTW3_INCLUDE} ${UUID_INCLUDE})
+    target_link_libraries(sdr_verify_rtlsdr PRIVATE
+        sdr_task_api SoapySDR ${PROTON_LIBRARIES} ${TINYXML2_LIBRARIES}
+        spdlog::spdlog fmt::fmt ${FFTW3F_LIB} ${UUID_LIB} Threads::Threads)
+endif()
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
-enable_testing()
-add_subdirectory(tests)
+# BUILD_TESTING defaults to ON (CMake convention) so `ctest` works out of the
+# box for local dev, but -DBUILD_TESTING=OFF must actually skip the gtest
+# suite — container builds on memory-constrained targets (e.g. Pi 4) pass
+# this specifically to avoid OOM-killing cc1plus on the heavier test TUs.
+option(BUILD_TESTING "Build the gtest suite" ON)
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS sdr_controller DESTINATION bin)
