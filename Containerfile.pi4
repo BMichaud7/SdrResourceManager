@@ -30,6 +30,36 @@
 #  Expected RAM: ~235 MB idle (vs ~950 MB for the k3s/Artemis mobile image)
 # ════════════════════════════════════════════════════════════════════════
 
+# ── Stage 0: skupper-router (successor to qpid-dispatch-router) ───────────
+#  qpid-dispatch-router is not available in Ubuntu 24.04 apt repos on any
+#  architecture.  Build skupper-router (the renamed upstream) from source.
+#  Installed under /opt/skupper so the binary finds its Python modules via
+#  the compiled-in prefix path.
+FROM ubuntu:24.04 AS skupper-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build pkg-config git ca-certificates \
+        python3-dev \
+        libssl-dev \
+        libnghttp2-dev \
+        libwebsockets-dev \
+        libqpid-proton-cpp12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch main \
+        https://github.com/skupperproject/skupper-router.git /tmp/skupper-router && \
+    cmake -S /tmp/skupper-router -B /tmp/skupper-router/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/skupper \
+        -DENABLE_WARNING_ERROR=OFF \
+        -DENABLE_FUZZ_TESTING=OFF \
+    && cmake --build /tmp/skupper-router/build --parallel "$(nproc)" \
+    && cmake --install /tmp/skupper-router/build \
+    && rm -rf /tmp/skupper-router
+
 # ── Stage 1: Builder ──────────────────────────────────────────────────────
 FROM ubuntu:24.04 AS builder
 
@@ -58,11 +88,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfftw3-dev \
         # UUID
         uuid-dev \
-        # DB client (libpqxx compile-time only; no postgres server at runtime)
-        libpqxx-dev \
+        # DB client — libpq-dev only; libpqxx 7.9.2 built from source below
+        # (Ubuntu 24.04's libpqxx-dev 7.8 has broken ABI: missing pqxx::conversion_overrun)
+        libpq-dev \
         # GPS
         libgps-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Build libpqxx 7.9.2 from source ───────────────────────────────────────
+#  Ubuntu 24.04's libpqxx-dev (7.8) is ABI-broken (missing
+#  pqxx::conversion_overrun).  Build 7.9.2 statically; only libpq5 needed
+#  at runtime.
+RUN git clone --depth 1 --branch 7.9.2 \
+        https://github.com/jtv/libpqxx.git /tmp/libpqxx && \
+    cmake -S /tmp/libpqxx -B /tmp/libpqxx/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DBUILD_TEST=OFF -DBUILD_DOC=OFF \
+        -DPostgreSQL_TYPE_INCLUDE_DIR=/usr/include/postgresql && \
+    cmake --build /tmp/libpqxx/build --parallel "$(nproc)" && \
+    cmake --install /tmp/libpqxx/build && \
+    rm -rf /tmp/libpqxx
 
 # ── Clone shared SDR libraries ─────────────────────────────────────────────
 RUN git clone --depth 1 --branch "main/1.0" \
@@ -119,8 +165,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # Lightweight AMQP 1.0 broker (C, ~20 MB RAM — replaces Artemis JVM)
-        qpid-dispatch-router \
         # SDR
         libsoapysdr0.8 \
         librtlsdr2 \
@@ -132,20 +176,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfmt9 \
         libfftw3-single3 \
         uuid-runtime \
-        libpqxx-7.8t64 \
+        # PostgreSQL client (libpqxx is statically linked; only libpq5 needed)
         libpq5 \
         # GPS
         gpsd \
         gpsd-clients \
         libgps30t64 \
+        # skupper-router runtime deps
+        python3 \
+        libssl3 \
+        libnghttp2-14 \
+        libwebsockets19t64 \
         # Utilities
         tini \
         netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # ── SoapyRTLSDR module (built from source in builder stage) ───────────────
+#  SoapySDR plugin .so lives under lib/SoapySDR/; libsoapysdr0.8 from apt
+#  provides the core library — no libSoapySDR*.so built from source here.
 COPY --from=builder /usr/local/lib/SoapySDR /usr/local/lib/SoapySDR
-COPY --from=builder /usr/local/lib/libSoapySDR* /usr/local/lib/
+
+# ── skupper-router (qdrouterd) ─────────────────────────────────────────────
+#  Installed to /opt/skupper; binary finds Python dispatch modules via the
+#  compiled-in prefix path.
+COPY --from=skupper-builder /opt/skupper /opt/skupper
+ENV PATH="/opt/skupper/sbin:${PATH}"
 
 # ── Application binaries ───────────────────────────────────────────────────
 COPY --from=builder /install/bin/sdr_controller  /usr/local/bin/sdr_controller

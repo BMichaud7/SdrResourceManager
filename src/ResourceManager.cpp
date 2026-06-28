@@ -188,8 +188,9 @@ ResourceManager::findBestDevice(double cf, double bw, double sr,
         // if no such multiple fits under sample_rate_max_sps.
         double dev_sr = sr;
         if (caps.sample_rate_min_sps > 0.0 && sr > 0.0 && sr < caps.sample_rate_min_sps) {
-            int decim = (int)std::ceil(caps.sample_rate_min_sps / sr);
-            if (decim < 1) decim = 1;
+            double decim_f = std::ceil(caps.sample_rate_min_sps / sr);
+            if (decim_f > 1e6) continue;  // unreasonably large decimation ratio — skip
+            int decim = std::max(1, (int)decim_f);
             dev_sr = sr * decim;
             if (caps.sample_rate_max_sps > 0.0 && dev_sr > caps.sample_rate_max_sps) continue;
         }
@@ -417,7 +418,13 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
         { std::lock_guard lock(reg_mu_); registry_[task_id] = rec; }
         // Run activateTask in a background thread so the proton AMQP thread
         // is not blocked by SoapySDR hardware I/O (openRxStream can take seconds).
-        if (activate_now) std::thread([this, task_id]() { activateTask(task_id); }).detach();
+        if (activate_now) {
+            activations_in_flight_.fetch_add(1, std::memory_order_relaxed);
+            std::thread([this, task_id]() {
+                activateTask(task_id);
+                activations_in_flight_.fetch_sub(1, std::memory_order_relaxed);
+            }).detach();
+        }
         notifyStateChange(task_id);
         return resp;
     }
@@ -628,39 +635,65 @@ TaskResponse ResourceManager::doAcceptSnapshot(const TaskRequest& req) {
 
     auto* dev = candidate->device;
     int snap_ch = candidate->fit.avail_rx[0];
-    bool tune_ok = dev->config().shared_lo
-                   ? dev->tune(sp.center_freq_hz, sp.sample_rate_sps)
-                   : dev->tuneChannel(snap_ch, sp.center_freq_hz, sp.sample_rate_sps);
-    if (!tune_ok) {
-        resp.reject_code = RejectCode::INTERNAL_ERROR;
-        resp.reject_reason = "Tune failed"; return resp;
+
+    // Serialize tune+open+activate against concurrent activateTask() threads on
+    // the same device.  hw_activation_mu_ is released before the blocking
+    // readStream loop and re-acquired for teardown.
+    SoapySDR::Stream* stream = nullptr;
+    {
+        std::unique_lock<std::mutex> hw_lock(hw_activation_mu_);
+        bool tune_ok = dev->config().shared_lo
+                       ? dev->tune(sp.center_freq_hz, sp.sample_rate_sps)
+                       : dev->tuneChannel(snap_ch, sp.center_freq_hz, sp.sample_rate_sps);
+        if (!tune_ok) {
+            resp.reject_code = RejectCode::INTERNAL_ERROR;
+            resp.reject_reason = "Tune failed"; return resp;
+        }
+        std::vector<int> chans = {snap_ch};
+        stream = dev->openRxStream(chans);
+        if (!stream) {
+            resp.reject_code = RejectCode::INTERNAL_ERROR;
+            resp.reject_reason = "Stream open failed"; return resp;
+        }
+        if (!dev->activateStream(stream)) {
+            dev->closeStream(stream);
+            resp.reject_code = RejectCode::INTERNAL_ERROR;
+            resp.reject_reason = "Stream activate failed"; return resp;
+        }
+    } // release hw_lock — readStream must not hold it (blocks for up to 1s)
+
+    // Validate before multiplying — client-supplied values can overflow int32.
+    if (sp.fft_size <= 0 || sp.n_averages <= 0 ||
+        (int64_t)sp.fft_size * sp.n_averages > 1 << 24) {
+        resp.reject_code   = RejectCode::INVALID_REQUEST;
+        resp.reject_reason = "snapshot fft_size/n_averages out of range";
+        dev->deactivateStream(stream);
+        dev->closeStream(stream);
+        return resp;
     }
-
-    std::vector<int> chans = {snap_ch};
-    SoapySDR::Stream* stream = dev->openRxStream(chans);
-    if (!stream) {
-        resp.reject_code = RejectCode::INTERNAL_ERROR;
-        resp.reject_reason = "Stream open failed"; return resp;
-    }
-
-    dev->activateStream(stream);
-
     int total = sp.fft_size * sp.n_averages;
     std::vector<float> buf((size_t)total * 2);
     void* bufs[1] = {buf.data()};
     int flags=0; long long hw_ts=0;
     int collected = 0;
+    int err_count = 0;
     while (collected < total) {
+        bufs[0] = buf.data() + (size_t)collected * 2;
         int rem = total - collected;
         int ret = dev->readStream(stream, bufs, (size_t)rem, flags, hw_ts, 1'000'000LL);
         if (ret > 0) {
-            bufs[0] = buf.data() + collected*2;
             collected += ret;
+            err_count = 0;
+        } else if (ret != SOAPY_SDR_TIMEOUT) {
+            if (++err_count >= 5) break;
         }
     }
 
-    dev->deactivateStream(stream);
-    dev->closeStream(stream);
+    {
+        std::unique_lock<std::mutex> hw_lock(hw_activation_mu_);
+        dev->deactivateStream(stream);
+        dev->closeStream(stream);
+    }
 
     auto result = fft_engine_->compute(buf, sp.fft_size, sp.n_averages,
                                        sp.center_freq_hz, sp.sample_rate_sps,
@@ -990,14 +1023,19 @@ ResourceManager::tryRetuneCombined(const TaskRequest& req,
              std::abs(cr.combined_sr - slots[0].sample_rate_sps) > 1.0);
 
         if (hw_changed) {
-            // Retune device hardware to the combined window
-            if (!dev->tune(cr.combined_cf, cr.combined_sr)) {
-                spdlog::warn("tryRetuneCombined: tune failed on {}", dev_id);
-                continue;
-            }
-
-            // Update timeline slots to reflect new device CF/SR
-            tl->updateDeviceTune(cr.combined_cf, cr.combined_sr);
+            // Serialize the tune + timeline update against concurrent activateTask()
+            // threads that may be calling openRxStream on the same device.
+            // Released before the rt_mu_ block to preserve lock ordering:
+            //   hw_activation_mu_ must never be acquired while rt_mu_ is held.
+            {
+                std::unique_lock<std::mutex> hw_lock(hw_activation_mu_);
+                if (!dev->tune(cr.combined_cf, cr.combined_sr)) {
+                    spdlog::warn("tryRetuneCombined: tune failed on {}", dev_id);
+                    continue;
+                }
+                // Update timeline slots to reflect new device CF/SR
+                tl->updateDeviceTune(cr.combined_cf, cr.combined_sr);
+            } // release hw_lock before acquiring rt_mu_
 
             // Pause all running streamers on this device for PLL settle,
             // then push the new CF/SR into the packet headers
@@ -1580,10 +1618,15 @@ void ResourceManager::deactivateTask(const std::string& task_id,
             }
 
             // Close the SoapySDR stream only when the last consumer (dest or sub-band) is gone.
+            // Shared-LO streams are tracked in channel_states_ — close when no consumers remain.
+            // Independent-LO streams are NOT in channel_states_ (each task owns its stream
+            // exclusively) — always close them directly to avoid leaking the SoapySDR stream.
             for (auto& [d, s] : rt.soapy_streams) {
                 bool should_close = false;
+                bool found_in_channel_states = false;
                 for (auto cs = channel_states_.begin(); cs != channel_states_.end(); ) {
                     if (cs->second.soapy_stream == s) {
+                        found_in_channel_states = true;
                         if (cs->second.streamer->totalConsumers() == 0) {
                             cs->second.streamer->stop();
                             should_close = true;
@@ -1594,6 +1637,13 @@ void ResourceManager::deactivateTask(const std::string& task_id,
                     } else {
                         ++cs;
                     }
+                }
+                if (!found_in_channel_states) {
+                    // Independent-LO stream exclusively owned by this task — stop all
+                    // its IQStreamers (idempotent) and close the stream unconditionally.
+                    for (auto& streamer : rt.streamers)
+                        streamer->stop();
+                    should_close = true;
                 }
                 if (should_close && d && s) {
                     d->deactivateStream(s);
@@ -1638,7 +1688,11 @@ void ResourceManager::schedulerTick() {
     }
     for (auto& id : to_activate) {
         spdlog::info("schedulerTick: activating {}", id);
-        activateTask(id);
+        activations_in_flight_.fetch_add(1, std::memory_order_relaxed);
+        std::thread([this, id]() {
+            activateTask(id);
+            activations_in_flight_.fetch_sub(1, std::memory_order_relaxed);
+        }).detach();
     }
 }
 

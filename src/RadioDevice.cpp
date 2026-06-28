@@ -134,14 +134,16 @@ bool RadioDevice::tune(double cf_hz, double sr_sps) {
 
         if (std::abs(target_rate - current_rate_) > 1.0) {
             dev_->setSampleRate(SOAPY_SDR_RX, 0, target_rate);
-            dev_->setSampleRate(SOAPY_SDR_TX, 0, target_rate);
+            if (cfg_.caps.tx_channels > 0)
+                dev_->setSampleRate(SOAPY_SDR_TX, 0, target_rate);
             current_rate_ = target_rate;
             spdlog::info("[{}] Sample rate set to {:.3f} MSPS", cfg_.id, target_rate/1e6);
         }
 
         // Pure LO hop — single IIO write, settles in ~25 µs on AD9361.
         dev_->setFrequency(SOAPY_SDR_RX, 0, cf_hz);
-        dev_->setFrequency(SOAPY_SDR_TX, 0, cf_hz);
+        if (cfg_.caps.tx_channels > 0)
+            dev_->setFrequency(SOAPY_SDR_TX, 0, cf_hz);
         current_cf_ = cf_hz;
         spdlog::info("[{}] Tuned {:.3f} MHz {:.3f} MSPS", cfg_.id, cf_hz/1e6, current_rate_/1e6);
         return true;

@@ -37,6 +37,7 @@ void FftEngine::ensurePlan(int n) {
 
 void FftEngine::hannWindow(void* in, int n) {
     auto* c = reinterpret_cast<std::complex<float>*>(in);
+    if (n == 1) { c[0] *= 0.0f; return; }  // single sample: Hann(0/(n-1)) = 0
     for (int i=0;i<n;++i)
         c[i] *= (float)(0.5*(1.0-std::cos(2.0*M_PI*i/(n-1))));
 }
@@ -56,16 +57,22 @@ SnapshotResult FftEngine::compute(
     r.device_id=dev_id; r.center_freq_hz=cf_hz;
     r.bandwidth_hz=bw_hz; r.sample_rate_sps=sr_sps;
     r.fft_size=fft_size; r.n_averages=n_avg;
-    r.freq_resolution_hz=sr_sps/fft_size;
-    r.freq_axis_start_hz=cf_hz-sr_sps/2.0;
-    r.freq_axis_step_hz=r.freq_resolution_hz;
 
+    if (fft_size <= 0) {
+        r.error_msg="fft_size must be > 0"; return r;
+    }
     if (n_avg <= 0) {
         r.error_msg="n_averages must be > 0"; return r;
     }
-    if ((int)s.size()<fft_size*n_avg*2) {
+    // Use int64 to avoid overflow; reject unreasonably large requests.
+    int64_t total64 = (int64_t)fft_size * n_avg * 2;
+    if (total64 > (int64_t)s.size()) {
         r.error_msg="Insufficient samples"; return r;
     }
+
+    r.freq_resolution_hz=sr_sps/fft_size;
+    r.freq_axis_start_hz=cf_hz-sr_sps/2.0;
+    r.freq_axis_step_hz=r.freq_resolution_hz;
     try {
         ensurePlan(fft_size);
         auto* in  = (fftwf_complex*)fin_;

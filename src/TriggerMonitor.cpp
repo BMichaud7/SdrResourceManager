@@ -47,41 +47,36 @@ float TriggerMonitor::rmsDbfs(const float* b, int n) {
 }
 
 void TriggerMonitor::loop() {
-    int pre_blks = std::max(1, (int)((params_.pre_trigger_ms/1000.0)*rate_/BLK));
-    std::deque<std::vector<float>> ring;
     std::vector<float> buf((size_t)BLK*2);
     void* bufs[1]={buf.data()};
     int flags=0; long long hw_ts=0;
-    bool triggered=false;
-    int post_rem=0, caps_done=0;
+    int caps_done=0;
 
     while (running_.load()) {
+        // Detection phase: read stream in this thread looking for threshold crossing.
         int ret=dev_->readStream(stream_, bufs, (size_t)BLK, flags, hw_ts, 200'000LL);
         if (ret==SOAPY_SDR_TIMEOUT||ret<0) continue;
         int n=std::min(ret,BLK);
         float rms=rmsDbfs(buf.data(),n);
+        if (rms < params_.threshold_dbfs) continue;
 
-        if (!triggered) {
-            std::vector<float> blk(buf.begin(), buf.begin()+n*2);
-            ring.push_back(std::move(blk));
-            if ((int)ring.size()>pre_blks) ring.pop_front();
-            if (rms >= params_.threshold_dbfs) {
-                triggered=true;
-                post_rem=(int)((params_.post_trigger_ms/1000.0)*rate_);
-                spdlog::info("TriggerMonitor [{}] TRIGGERED {:.1f}dBFS", task_id_, rms);
-                ring.clear();
-                if (streamer_ && !streamer_->isRunning()) streamer_->start();
-            }
-        } else {
-            post_rem -= n;
-            if (post_rem<=0) {
-                triggered=false;
-                if (streamer_ && streamer_->isRunning()) streamer_->stop();
-                ++caps_done; captures_.store(caps_done);
-                spdlog::info("TriggerMonitor [{}] capture #{} done", task_id_, caps_done);
-                if (params_.max_captures>0 && caps_done>=params_.max_captures) break;
-            }
-        }
+        spdlog::info("TriggerMonitor [{}] TRIGGERED {:.1f}dBFS", task_id_, rms);
+
+        // Hand off to IQStreamer: stop reading from stream so IQStreamer's
+        // workerLoop is the sole reader (two concurrent readStream callers on the
+        // same SoapySDR::Stream are not safe and would race for packets).
+        if (streamer_ && !streamer_->isRunning()) streamer_->start();
+
+        // Wait post_trigger_ms via sleep rather than by counting samples —
+        // the stream is owned by IQStreamer during this window.
+        auto post_end = steady_clock::now() + milliseconds(params_.post_trigger_ms);
+        while (running_.load() && steady_clock::now() < post_end)
+            std::this_thread::sleep_for(milliseconds(10));
+
+        if (streamer_ && streamer_->isRunning()) streamer_->stop();
+        ++caps_done; captures_.store(caps_done);
+        spdlog::info("TriggerMonitor [{}] capture #{} done", task_id_, caps_done);
+        if (params_.max_captures>0 && caps_done>=params_.max_captures) break;
     }
     if(done_) done_(task_id_,true);
 }
