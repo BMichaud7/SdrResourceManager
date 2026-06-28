@@ -1,0 +1,74 @@
+# Containerfile.sdr-ctrl — Standalone sdr_controller image
+# Ubuntu 24.04, x86_64 or arm64, RTL-SDR via SoapyRTLSDR
+#
+# Build (from repo root or SdrResourceManager dir):
+#   podman build -f SdrResourceManager/Containerfile.sdr-ctrl \
+#     -t sdr-controller:latest SdrResourceManager/
+#
+# Run (with RTL-SDR USB passthrough):
+#   podman run -d --name sdr-ctrl --network=host --privileged \
+#     -v /dev/bus/usb:/dev/bus/usb \
+#     -v /path/to/devices.xml:/etc/sdr-controller/devices.xml:ro \
+#     sdr-controller:latest
+
+FROM ubuntu:24.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake pkg-config git ca-certificates \
+        libsoapysdr-dev librtlsdr-dev \
+        libqpid-proton-cpp12-dev \
+        libtinyxml2-dev nlohmann-json3-dev \
+        libspdlog-dev libfmt-dev \
+        libfftw3-dev uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build SoapyRTLSDR module
+RUN git clone --depth 1 https://github.com/pothosware/SoapyRTLSDR.git /tmp/SoapyRTLSDR && \
+    cmake -S /tmp/SoapyRTLSDR -B /tmp/SoapyRTLSDR/build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build /tmp/SoapyRTLSDR/build --parallel "$(nproc)" && \
+    cmake --install /tmp/SoapyRTLSDR/build && \
+    rm -rf /tmp/SoapyRTLSDR
+
+# Clone shared SDR libraries
+RUN git clone --depth 1 --branch "main/1.0" \
+        https://github.com/BMichaud7/SdrSdk.git /workspace/SdrSdk && \
+    git clone --depth 1 --branch "main/1.0" \
+        https://github.com/BMichaud7/SdrTaskApi.git /workspace/SdrTaskApi
+
+# Build SdrResourceManager
+WORKDIR /workspace/SdrResourceManager
+COPY CMakeLists.txt .
+COPY include/       include/
+COPY src/           src/
+COPY config/        config/
+COPY client/        client/
+
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/install -DBUILD_TESTING=OFF && \
+    cmake --build build --parallel "$(nproc)" && \
+    cmake --install build
+
+# Runtime image
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsoapysdr0.8 librtlsdr2 \
+        libqpid-proton-cpp12 libtinyxml2-10 \
+        libspdlog1.12 libfmt9 libfftw3-single3 uuid-runtime \
+        tini netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/local/lib/SoapySDR /usr/local/lib/SoapySDR
+COPY --from=builder /install/bin/sdr_controller /usr/local/bin/sdr_controller
+COPY --from=builder /install/bin/sdr_client     /usr/local/bin/sdr_client
+COPY --from=builder /install/etc/sdr-controller /etc/sdr-controller
+
+RUN ldconfig /usr/local/lib && \
+    groupadd -r sdr && useradd -r -g sdr -s /sbin/nologin sdr
+
+ENV SDR_LOG_LEVEL=info
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/sdr_controller", "/etc/sdr-controller/devices.xml"]
