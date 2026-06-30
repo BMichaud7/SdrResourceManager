@@ -181,20 +181,20 @@ void AmqpClient::stop() {
 
 void AmqpClient::sendResponse(const std::string& body, const std::string& reply_to) {
     if (!connected_) { spdlog::warn("AmqpClient: sendResponse while disconnected"); return; }
-    // sendResponse is called from within on_message (proton thread) — calling
-    // sendOn directly is safe and avoids the ~15s schedule idle-timeout delay.
-    if (reply_to.empty() || reply_to == cfg_.response_queue) {
-        handler_->sendOn(handler_->response_sender_, body);
-    } else {
-        // Route to the caller's own reply queue (AMQP request-reply pattern).
-        // Open a per-call sender; proton reuses the underlying link if the
-        // target address is the same across calls within one connection.
-        proton::sender_options sopts;
-        sopts.target(proton::target_options().capabilities({proton::symbol("queue")}));
-        proton::connection conn = handler_->response_sender_.connection();
-        proton::sender s = conn.open_sender(reply_to, sopts);
-        handler_->sendOn(s, body);
-    }
+    // May be called from any thread (e.g. background snapshot thread) — schedule
+    // onto the reactor thread via container_->schedule so proton sender objects
+    // are only touched from the reactor thread.
+    container_->schedule(proton::duration(0), [this, body, reply_to]() {
+        if (reply_to.empty() || reply_to == cfg_.response_queue) {
+            handler_->sendOn(handler_->response_sender_, body);
+        } else {
+            proton::sender_options sopts;
+            sopts.target(proton::target_options().capabilities({proton::symbol("queue")}));
+            proton::connection conn = handler_->response_sender_.connection();
+            proton::sender s = conn.open_sender(reply_to, sopts);
+            handler_->sendOn(s, body);
+        }
+    });
 }
 
 void AmqpClient::sendStatus(const std::string& body) {
