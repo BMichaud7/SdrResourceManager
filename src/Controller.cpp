@@ -133,8 +133,14 @@ void Controller::handleHealthQuery(const TaskRequest& req, const std::string& re
 }
 
 void Controller::handleSnapshotRequest(const TaskRequest& req, const std::string& reply_to) {
-    auto resp = rm_->tryAccept(req);
-    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
+    // doAcceptSnapshot tunes hardware and blocks in readStream for up to several
+    // seconds. Running it on the AMQP reactor thread would starve heartbeats and
+    // risk broker disconnect. Dispatch to a background thread and send the
+    // response from there — amqp_->sendResponse is thread-safe (work_queue).
+    std::thread([this, req, reply_to]() {
+        auto resp = rm_->tryAccept(req);
+        amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
+    }).detach();
 }
 
 void Controller::onTaskStateChanged(const TaskRecord& rec) {
