@@ -81,7 +81,7 @@ SnapshotResult FftEngine::compute(
         double norm=(double)fft_size*(double)fft_size;
 
         for (int a=0;a<n_avg;++a) {
-            const float* src=s.data()+a*fft_size*2;
+            const float* src=s.data()+(size_t)a*fft_size*2;
             auto* cbuf=reinterpret_cast<std::complex<float>*>(in);
             for (int i=0;i<fft_size;++i) cbuf[i]={src[i*2],src[i*2+1]};
             hannWindow(in,fft_size);
