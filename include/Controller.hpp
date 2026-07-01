@@ -76,6 +76,9 @@ private:
     std::thread        watchdog_thread_;   ///< Calls rm_->watchdogTick() periodically.
     std::thread        heartbeat_thread_;  ///< Publishes TASK_STATUS heartbeats.
 
+    std::mutex               snapshot_mu_;
+    std::vector<std::thread> snapshot_threads_; ///< In-flight snapshot threads; joined in stop().
+
     std::chrono::steady_clock::time_point start_time_;
 
     void onMessage(const std::string& body, const std::string& reply_to);

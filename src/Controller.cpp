@@ -15,6 +15,7 @@ Contact author for permission: https://github.com/OpenRFStack
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 #include <thread>
 
 namespace sdr {
@@ -61,10 +62,18 @@ void Controller::run() {
 
 void Controller::stop() {
     running_.store(false);
+    // Stop AMQP before joining background threads so no new snapshot threads
+    // can be spawned via handleSnapshotRequest() while we're cleaning up.
+    amqp_->stop();
     if (scheduler_thread_.joinable()) scheduler_thread_.join();
     if (watchdog_thread_.joinable())  watchdog_thread_.join();
     if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
-    amqp_->stop();
+    {
+        std::lock_guard<std::mutex> lk(snapshot_mu_);
+        for (auto& t : snapshot_threads_)
+            if (t.joinable()) t.join();
+        snapshot_threads_.clear();
+    }
     rm_->closeDevices();
 }
 
@@ -135,12 +144,13 @@ void Controller::handleHealthQuery(const TaskRequest& req, const std::string& re
 void Controller::handleSnapshotRequest(const TaskRequest& req, const std::string& reply_to) {
     // doAcceptSnapshot tunes hardware and blocks in readStream for up to several
     // seconds. Running it on the AMQP reactor thread would starve heartbeats and
-    // risk broker disconnect. Dispatch to a background thread and send the
-    // response from there — amqp_->sendResponse is thread-safe (work_queue).
-    std::thread([this, req, reply_to]() {
+    // risk broker disconnect. Track in snapshot_threads_ so stop() can join them
+    // before destroying rm_/amqp_ — detach() would leave a dangling 'this'.
+    std::lock_guard<std::mutex> lk(snapshot_mu_);
+    snapshot_threads_.push_back(std::thread([this, req, reply_to]() {
         auto resp = rm_->tryAccept(req);
         amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
-    }).detach();
+    }));
 }
 
 void Controller::onTaskStateChanged(const TaskRecord& rec) {
