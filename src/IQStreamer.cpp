@@ -298,13 +298,23 @@ void IQStreamer::workerLoop() {
     std::vector<uint32_t> extra_seqs(cfg_.extra_channels.size(), 0u);
     for (auto& ec : cfg_.extra_channels) {
         int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) {
+            spdlog::error("IQStreamer [{}] extra-ch socket() failed for {}:{}",
+                          cfg_.stream_id, ec.dest_ip, ec.dest_port);
+            extra_fds.push_back(-1);
+            continue;
+        }
         int sndbuf = 8*1024*1024;
         ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
         sockaddr_in dst{};
         dst.sin_family      = AF_INET;
         dst.sin_port        = htons((uint16_t)ec.dest_port);
         dst.sin_addr.s_addr = ::inet_addr(ec.dest_ip.c_str());
-        ::connect(fd, (sockaddr*)&dst, sizeof(dst));
+        if (::connect(fd, (sockaddr*)&dst, sizeof(dst)) < 0) {
+            spdlog::error("IQStreamer [{}] extra-ch connect() failed for {}:{}",
+                          cfg_.stream_id, ec.dest_ip, ec.dest_port);
+            ::close(fd); fd = -1;
+        }
         extra_fds.push_back(fd);
     }
 
@@ -356,7 +366,7 @@ void IQStreamer::workerLoop() {
 
         // Extra channels: each gets its own buffer, sequence counter, and UDP socket
         for (int i = 0; i < (int)cfg_.extra_channels.size(); ++i) {
-            if (nsamples>0 || pkt_flags)
+            if ((nsamples>0 || pkt_flags) && extra_fds[i] >= 0)
                 sendPacketToFd(extra_fds[i], extra_seqs[i],
                                cfg_.extra_channels[i].channel_index,
                                ch_bufs[i+1].data(), nsamples, ts_ns, pkt_flags);
@@ -385,7 +395,7 @@ void IQStreamer::workerLoop() {
         }
     }
 
-    for (int fd : extra_fds) ::close(fd);
+    for (int fd : extra_fds) if (fd >= 0) ::close(fd);
 }
 
 StreamMetrics IQStreamer::getMetrics() const {
