@@ -184,16 +184,44 @@ bool RadioDevice::setTxAtten(int ch, double atten_db) {
     catch (...) { return false; }
 }
 
-SoapySDR::Stream* RadioDevice::openRxStream(const std::vector<int>& channels) {
-    std::lock_guard lock(mu_);
-    if (!online_||!dev_) return nullptr;
-    try {
-        std::vector<size_t> chans;
-        for (int c : channels) chans.push_back(static_cast<size_t>(c));
-        return dev_->setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, chans);
-    } catch (const std::exception& ex) {
-        spdlog::error("[{}] openRxStream: {}", cfg_.id, ex.what()); return nullptr;
+bool RadioDevice::reopen() {
+    // mu_ must NOT be held by the caller — open()/close() acquire it internally.
+    spdlog::warn("[{}] reopen: closing stale device connection", cfg_.id);
+    close();
+    if (!open()) {
+        spdlog::error("[{}] reopen: failed to reopen device", cfg_.id);
+        return false;
     }
+    spdlog::info("[{}] reopen: device reconnected", cfg_.id);
+    return true;
+}
+
+SoapySDR::Stream* RadioDevice::openRxStream(const std::vector<int>& channels) {
+    {
+        std::lock_guard lock(mu_);
+        if (!online_||!dev_) return nullptr;
+        try {
+            std::vector<size_t> chans;
+            for (int c : channels) chans.push_back(static_cast<size_t>(c));
+            SoapySDR::Stream* s = dev_->setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, chans);
+            consecutive_stream_failures_ = 0;
+            return s;
+        } catch (const std::exception& ex) {
+            spdlog::error("[{}] openRxStream: {}", cfg_.id, ex.what());
+        }
+    }
+    // On failure: if the driver is network-backed (PlutoSDR/IIO) a stale or
+    // half-open TCP connection to iiod causes the NEXT connect() to block for
+    // the OS TCP connect timeout (up to 2 min), not the 5 s iio_context timeout.
+    // Reopen the device after consecutive failures to get a fresh connection.
+    ++consecutive_stream_failures_;
+    if (consecutive_stream_failures_ >= 2) {
+        spdlog::warn("[{}] openRxStream: {} consecutive failures — reopening device",
+                     cfg_.id, consecutive_stream_failures_);
+        consecutive_stream_failures_ = 0;
+        reopen();
+    }
+    return nullptr;
 }
 
 bool RadioDevice::activateStream(SoapySDR::Stream* s) {

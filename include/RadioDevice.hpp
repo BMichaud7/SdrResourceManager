@@ -160,6 +160,17 @@ public:
     /// @brief Return a status snapshot (safe to call from any thread).
     Status getStatus() const;
 
+    /**
+     * @brief Close and reopen the device to recover from a broken connection.
+     *
+     * Called automatically by openRxStream() after consecutive failures to
+     * recover from stale network state (e.g. a dead iiod TCP connection that
+     * would otherwise cause connect() to block for minutes on the next attempt).
+     *
+     * @return true if the reopen succeeded.
+     */
+    bool reopen();
+
 private:
     DeviceConfig      cfg_;
     SoapySDR::Device* dev_    = nullptr;
@@ -167,6 +178,7 @@ private:
     mutable std::mutex mu_;
     double current_cf_   = 0.0;
     double current_rate_ = 0.0;
+    int consecutive_stream_failures_ = 0;
 
     // Identifier (uri/hostname/serial/label) claimed via Device::enumerate()
     // when devices.xml leaves <uri> empty, so a second RadioDevice instance
