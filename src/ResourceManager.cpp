@@ -667,8 +667,11 @@ TaskResponse ResourceManager::doAcceptSnapshot(const TaskRequest& req) {
         (int64_t)sp.fft_size * sp.n_averages > 1 << 24) {
         resp.reject_code   = RejectCode::INVALID_REQUEST;
         resp.reject_reason = "snapshot fft_size/n_averages out of range";
-        dev->deactivateStream(stream);
-        dev->closeStream(stream);
+        {
+            std::unique_lock<std::mutex> hw_lock(hw_activation_mu_);
+            dev->deactivateStream(stream);
+            dev->closeStream(stream);
+        }
         return resp;
     }
     int total = sp.fft_size * sp.n_averages;
@@ -895,8 +898,10 @@ ResourceManager::tryRetuneCombined(const TaskRequest& req,
                                     int64_t t_start, int64_t t_stop)
 {
     const double guard  = cfg_.policy.guard_band_hz;
-    // Settle window: drain 2 packets' worth of samples after retune
-    const int    settle = cfg_.policy.iq_packet_samples * 2;
+    // Settle window: drain 2 readStream calls after retune.
+    // drain_countdown_ is decremented once per workerLoop iteration (one readStream
+    // call = one packet), not per sample — so this must be 2, not 2*packet_samples.
+    const int    settle = 2;
 
     for (auto& [dev_id, tl] : timelines_) {
         auto& dev = devices_.at(dev_id);
