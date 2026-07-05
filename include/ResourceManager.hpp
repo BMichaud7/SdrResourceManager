@@ -196,6 +196,9 @@ private:
     std::atomic<int> activations_in_flight_{0};
 
     std::chrono::steady_clock::time_point start_time_;
+    // Timestamp of the last attempt to open offline devices. Zero on init
+    // so the first watchdog tick always runs the retry.
+    std::chrono::steady_clock::time_point last_device_open_attempt_{};
 
     TaskResponse doAcceptStandard(const TaskRequest& req);
     TaskResponse doAcceptScan(const TaskRequest& req);

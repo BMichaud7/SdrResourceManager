@@ -1716,6 +1716,22 @@ void ResourceManager::watchdogTick() {
         spdlog::info("watchdogTick: expiring {}", id);
         deactivateTask(id, TaskState::COMPLETED, "stop_time reached");
     }
+
+    // Periodically retry opening devices that failed at startup (e.g. a
+    // network-attached device whose mDNS entry wasn't published yet when
+    // openDevices() ran). Interval: 30 seconds.
+    using namespace std::chrono;
+    auto tp_now = steady_clock::now();
+    if (tp_now - last_device_open_attempt_ >= seconds(30)) {
+        last_device_open_attempt_ = tp_now;
+        for (auto& [id, dev] : devices_) {
+            if (!dev->isOnline()) {
+                spdlog::info("watchdogTick: retrying open for offline device {}", id);
+                if (dev->open())
+                    spdlog::info("watchdogTick: {} came online", id);
+            }
+        }
+    }
 }
 
 // ── Queries ──────────────────────────────────────────────────────────────
