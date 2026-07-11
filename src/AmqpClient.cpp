@@ -140,12 +140,14 @@ AmqpClient::~AmqpClient() { stop(); }
 
 void AmqpClient::start() {
     running_.store(true);
-    container_thread_ = std::thread([this]() {
+    container_stopped_->store(false);
+    auto stopped = container_stopped_;  // shared ownership — safe if detached
+    container_thread_ = std::thread([this, stopped]() {
         try { container_->run(); }
         catch (const std::exception& ex) {
             spdlog::error("AmqpClient: container run exception: {}", ex.what());
         }
-        container_stopped_.store(true);
+        stopped->store(true);
     });
     spdlog::info("AmqpClient: started, connecting to {}", cfg_.url);
 }
@@ -166,9 +168,9 @@ void AmqpClient::stop() {
         // thread when the process exits regardless. Confirmed live: without
         // this, `podman stop` on sdr_controller against a real RTL-SDR with
         // no broker present always hit the stop timeout and needed SIGKILL.
-        for (int i = 0; i < 30 && !container_stopped_.load(); ++i)
+        for (int i = 0; i < 30 && !container_stopped_->load(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (container_stopped_.load()) {
+        if (container_stopped_->load()) {
             container_thread_.join();
         } else {
             spdlog::warn("AmqpClient: proton thread still in reconnect "

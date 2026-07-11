@@ -76,7 +76,11 @@ private:
     // Set by the container_thread_ lambda itself right before it returns —
     // lets stop() decide join() vs. detach() without ever calling both on
     // the same std::thread concurrently (see stop()'s comment).
-    std::atomic<bool> container_stopped_{false};
+    // Heap-allocated so the detached thread's captured copy keeps it alive
+    // past AmqpClient's destruction (fixes heap-use-after-free when the
+    // proton reconnect backoff outlasts the 3 s grace period in stop()).
+    std::shared_ptr<std::atomic<bool>> container_stopped_{
+        std::make_shared<std::atomic<bool>>(false)};
 
     friend class Handler;
     void onConnected();
