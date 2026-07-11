@@ -139,14 +139,22 @@ ResourceManager::findBestDevice(double cf, double bw, double sr,
                                  int rx, int tx,
                                  int64_t t_start, int64_t t_stop,
                                  const std::string& preferred,
-                                 int preferred_channel) const
+                                 int preferred_channel,
+                                 bool device_required) const
 {
-    // Sort devices: preferred first, then by free BW descending
+    // When device_required=true only the named device is tried; return nullopt
+    // immediately if it can't fit rather than falling back to another device.
     std::vector<std::string> ordered;
-    if (!preferred.empty() && devices_.count(preferred))
-        ordered.push_back(preferred);
-    for (auto& [id, _] : devices_)
-        if (id != preferred) ordered.push_back(id);
+    if (device_required && !preferred.empty()) {
+        if (devices_.count(preferred)) ordered.push_back(preferred);
+        // No fallback — intentionally leaves ordered with at most one entry.
+    } else {
+        // Sort devices: preferred first, then by free BW descending
+        if (!preferred.empty() && devices_.count(preferred))
+            ordered.push_back(preferred);
+        for (auto& [id, _] : devices_)
+            if (id != preferred) ordered.push_back(id);
+    }
 
     // Sort non-preferred by free BW (preferred, if present, stays first).
     // Snapshot each device's allocated bandwidth once up front: reading it
@@ -430,17 +438,20 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
     }
 
     // ── Single-device path ───────────────────────────────────────────────────
-    const int pref_ch = req.rf.preferred_channel; // -1 = any; ≥0 = specific
+    const int  pref_ch  = req.rf.preferred_channel; // -1 = any; ≥0 = specific
+    // required_device is a hard constraint — use it as preferred and suppress fallback.
+    const bool dev_req  = !req.rf.required_device.empty();
+    const std::string& pref_dev = dev_req ? req.rf.required_device : req.rf.preferred_device;
     auto candidate = findBestDevice(
         req.rf.center_freq_hz, req.rf.bandwidth_hz, req.rf.sample_rate_sps,
         req.rf.rx_count, req.rf.tx_count, t_start, t_stop,
-        req.rf.preferred_device, pref_ch);
+        pref_dev, pref_ch, dev_req);
 
     if (!candidate && req.rank > 0 && tryPreemptConflicting(req, t_start, t_stop)) {
         candidate = findBestDevice(
             req.rf.center_freq_hz, req.rf.bandwidth_hz, req.rf.sample_rate_sps,
             req.rf.rx_count, req.rf.tx_count, t_start, t_stop,
-            req.rf.preferred_device, pref_ch);
+            pref_dev, pref_ch, dev_req);
     }
 
     // Try expanding an existing shared-LO window to fit both tasks.

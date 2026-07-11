@@ -211,7 +211,8 @@ private:
                        int rx_count, int tx_count,
                        int64_t t_start, int64_t t_stop,
                        const std::string& preferred,
-                       int preferred_channel = -1) const;
+                       int preferred_channel = -1,
+                       bool device_required  = false) const;
 
     void activateTask(const std::string& task_id);
     void deactivateTask(const std::string& task_id, TaskState terminal_state,
