@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  dev-local.xml — Local development config for dev PC
+  Hardware: PlutoSDR (USB direct) + WiNRADiO G39DDC (USB direct)
+  Usage:
+    ./build-local/sdr_controller config/dev-local.xml
+-->
+<sdr_controller version="2.0">
+
+  <broker>
+    <url>amqp://localhost:5672</url>
+    <username>sdr_ctrl</username>
+    <password>sdr_ctrl</password>
+    <request_queue>sdr.task.request</request_queue>
+    <response_queue>sdr.task.response</response_queue>
+    <status_topic>sdr.status</status_topic>
+    <health_topic>sdr.health</health_topic>
+    <reconnect_interval_sec>3</reconnect_interval_sec>
+    <max_reconnect_interval_sec>15</max_reconnect_interval_sec>
+    <send_queue_depth>256</send_queue_depth>
+  </broker>
+
+  <policy>
+    <max_concurrent_tasks>16</max_concurrent_tasks>
+    <guard_band_hz>200000</guard_band_hz>
+    <usable_bw_fraction>0.80</usable_bw_fraction>
+    <default_task_timeout_ms>3600000</default_task_timeout_ms>
+    <scheduler_tick_ms>200</scheduler_tick_ms>
+    <watchdog_tick_ms>1000</watchdog_tick_ms>
+    <udp_port_pool_start>30000</udp_port_pool_start>
+    <udp_port_pool_end>30199</udp_port_pool_end>
+    <!-- 183 samples = max CF32 payload fitting standard 1500-byte MTU -->
+    <iq_packet_samples>183</iq_packet_samples>
+    <retune_conflict_policy>REJECT_NEW</retune_conflict_policy>
+    <heartbeat_interval_ms>10000</heartbeat_interval_ms>
+  </policy>
+
+  <devices>
+
+    <!-- PlutoSDR — USB direct (driver=plutosdr, auto-discover) -->
+    <device id="pluto-0">
+      <driver>plutosdr</driver>
+      <uri></uri>   <!-- empty = auto-discover via USB scan/zeroconf -->
+      <label>PlutoSDR USB</label>
+      <streaming_source_ip>127.0.0.1</streaming_source_ip>
+      <coherency_group>local</coherency_group>
+      <shared_lo>true</shared_lo>
+      <rx_gain_db>30</rx_gain_db>
+      <capabilities>
+        <!-- ADALM-PLUTO with AD9363: 1 RX / 1 TX (AD9361 variant has 2, but this unit is AD9363) -->
+        <rx_channels>1</rx_channels>
+        <tx_channels>1</tx_channels>
+        <freq_min_hz>70000000</freq_min_hz>
+        <freq_max_hz>6000000000</freq_max_hz>
+        <bandwidth_max_hz>20000000</bandwidth_max_hz>
+        <sample_rate_max_sps>61440000</sample_rate_max_sps>
+        <!-- AD9363 documented minimum interface rate with FIR disabled -->
+        <sample_rate_min_sps>520833</sample_rate_min_sps>
+        <rx_gain_min_db>-3</rx_gain_min_db>
+        <rx_gain_max_db>71</rx_gain_max_db>
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>89</tx_atten_max_db>
+      </capabilities>
+    </device>
+
+    <!-- WiNRADiO G39DDC — USB direct (driver=g39ddc, auto-discover) -->
+    <!--
+      Notes from SoapySDRUtil --probe="driver=g39ddc" on serial 20K02117:
+        - Ch0: SR 0.025–5 MSps, filter BW up to 4 MHz, freq 8–3500 MHz, gain 0–10 dB
+        - Ch1: SR 0.025–2.5 MSps, filter BW up to 2 MHz, freq 8–3500 MHz, gain 0–10 dB
+        - Ch1 max SR (2.5 MSps) is lower than Ch0 (5 MSps) — capped to Ch1 limit below.
+        - Sample rates are DISCRETE (0.025, 0.032, 0.04, ...) — driver rounds to nearest.
+        - 0 TX channels — shared_lo=false (2 independently tunable DDC channels).
+    -->
+    <device id="winradio-0">
+      <driver>g39ddc</driver>
+      <uri></uri>   <!-- empty = auto-discover; or: driver=g39ddc,serial=20K02117 -->
+      <label>WiNRADiO G39DDC</label>
+      <streaming_source_ip>127.0.0.1</streaming_source_ip>
+      <coherency_group>local</coherency_group>
+      <!-- DDC channels are independently tunable but share a ~16 MHz analog
+           front-end window. Setting shared_lo=true prevents the scheduler
+           from assigning simultaneous tasks at incompatible frequencies,
+           which the G39DDC driver warns about with "no longer fits the
+           front-end window". -->
+      <shared_lo>true</shared_lo>
+      <rx_gain_db>5</rx_gain_db>
+      <capabilities>
+        <rx_channels>2</rx_channels>
+        <tx_channels>0</tx_channels>
+        <freq_min_hz>8000000</freq_min_hz>
+        <freq_max_hz>3500000000</freq_max_hz>
+        <!-- Max filter BW of Ch1 (narrower channel) -->
+        <bandwidth_max_hz>2000000</bandwidth_max_hz>
+        <!-- Capped to Ch1 max (2.5 MSps) to avoid requesting rates Ch1 can't handle -->
+        <sample_rate_max_sps>2500000</sample_rate_max_sps>
+        <!-- Minimum discrete rate from probe output -->
+        <sample_rate_min_sps>25000</sample_rate_min_sps>
+        <rx_gain_min_db>0</rx_gain_min_db>
+        <rx_gain_max_db>10</rx_gain_max_db>
+        <!-- RX-only device — TX fields unused -->
+        <tx_atten_min_db>0</tx_atten_min_db>
+        <tx_atten_max_db>0</tx_atten_max_db>
+      </capabilities>
+    </device>
+
+  </devices>
+
+</sdr_controller>
