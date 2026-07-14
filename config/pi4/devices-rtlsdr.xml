@@ -53,10 +53,12 @@
         <!-- Stable at 2.4 MSPS; 3.2 MSPS works but drops samples on busy Pi -->
         <bandwidth_max_hz>2400000</bandwidth_max_hz>
         <sample_rate_max_sps>2400000</sample_rate_max_sps>
-        <!-- RTL2832U rejects setSampleRate() below this (librtlsdr). Narrowband/
-             digital-protocol tasks below it are auto-clamped + DDC-decimated by
-             the controller instead of failing at the hardware layer. -->
-        <sample_rate_min_sps>225001</sample_rate_min_sps>
+        <!-- RTL2832U valid ranges: 225001-300000 Hz and 900001-3200000 Hz.
+             Values 300001-900000 Hz cause setSampleRate() to fail at the
+             hardware layer. Set min to 900001 so the scheduler's DDC-decimation
+             path snaps any narrowband request to a multiple ≥ 900001 Hz
+             (e.g. 500 kHz → 2× = 1 MHz) instead of passing it raw. -->
+        <sample_rate_min_sps>900001</sample_rate_min_sps>
         <rx_gain_min_db>0</rx_gain_min_db>
         <rx_gain_max_db>49</rx_gain_max_db>
         <tx_atten_min_db>0</tx_atten_min_db>
