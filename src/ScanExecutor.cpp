@@ -50,9 +50,9 @@ void ScanExecutor::loop() {
             const auto& e = params_.entries[i];
             step_.store((int)i);
             if (!retune_(e.center_freq_hz, e.sample_rate_sps)) {
-                spdlog::error("ScanExecutor [{}] retune failed step {}", task_id_, i);
-                if (done_) done_(task_id_, false);
-                return;
+                spdlog::warn("ScanExecutor [{}] retune failed step {} ({:.3f} MHz) — skipping",
+                             task_id_, i, e.center_freq_hz / 1e6);
+                continue;
             }
             for (auto* s : streamers_)
                 if (s && s->isRunning()) s->updateCenterFreq(e.center_freq_hz);
