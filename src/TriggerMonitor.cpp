@@ -37,7 +37,14 @@ void TriggerMonitor::start() {
 
 void TriggerMonitor::stop() {
     running_.store(false);
-    if (thread_.joinable()) thread_.join();
+    if (!thread_.joinable()) return;
+    // done_() fires from loop() which runs on thread_ — joining from the same
+    // thread is UB; detach so the thread cleans up on its own (same pattern
+    // as ScanExecutor::stop()).
+    if (thread_.get_id() == std::this_thread::get_id())
+        thread_.detach();
+    else
+        thread_.join();
 }
 
 float TriggerMonitor::rmsDbfs(const float* b, int n) {
