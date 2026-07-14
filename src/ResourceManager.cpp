@@ -474,13 +474,15 @@ TaskResponse ResourceManager::doAcceptStandard(const TaskRequest& req) {
     if (!req.streaming.dest_ports.empty()) {
         ports = req.streaming.dest_ports;
         // Pad with pool ports for any channels the client didn't cover.
-        while ((int)ports.size() < n_ports) {
-            auto extra = port_pool_->allocateN(1);
-            if (extra.empty()) {
+        int need = n_ports - (int)ports.size();
+        if (need > 0) {
+            auto extra = port_pool_->allocateN(need);
+            if ((int)extra.size() < need) {
+                port_pool_->releaseAll(extra);
                 resp.reject_code   = RejectCode::PORT_POOL_EXHAUSTED;
                 resp.reject_reason = "UDP port pool exhausted"; return resp;
             }
-            ports.push_back(extra[0]);
+            ports.insert(ports.end(), extra.begin(), extra.end());
         }
     } else {
         ports = port_pool_->allocateN(n_ports);
