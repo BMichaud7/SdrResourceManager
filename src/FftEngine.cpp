@@ -53,6 +53,10 @@ SnapshotResult FftEngine::compute(
     const std::vector<float>& s, int fft_size, int n_avg,
     double cf_hz, double sr_sps, double bw_hz, const std::string& dev_id)
 {
+    // Serialise: fin_/fout_/plan_ are instance buffers shared across all callers.
+    // Concurrent snapshot threads on different devices would corrupt each other
+    // without this lock. Snapshots are infrequent so contention is negligible.
+    std::lock_guard lock(mu_);
     SnapshotResult r;
     r.device_id=dev_id; r.center_freq_hz=cf_hz;
     r.bandwidth_hz=bw_hz; r.sample_rate_sps=sr_sps;

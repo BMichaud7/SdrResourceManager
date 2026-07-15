@@ -21,6 +21,7 @@ IQ samples. Returns a SnapshotResult with frequency and power axes.
 #include "sdr/Types.hpp"
 #include <vector>
 #include <string>
+#include <mutex>
 
 namespace sdr {
 
@@ -42,6 +43,7 @@ private:
     void hannWindow(void* in, int n);
     void fftshift(std::vector<double>& bins);
 
+    mutable std::mutex mu_;
     int   plan_size_=0;
     void* plan_=nullptr;
     void* fin_=nullptr;
