@@ -98,7 +98,7 @@ void Controller::onMessage(const std::string& body, const std::string& reply_to)
 void Controller::handleTaskRequest(const TaskRequest& req, const std::string& reply_to) {
     if (req.task_type == TaskType::UNKNOWN) {
         sendReject(req.request_id, req.correlation_id,
-                   RejectCode::INVALID_TASK_TYPE, "Unknown task_type"); return;
+                   RejectCode::INVALID_TASK_TYPE, "Unknown task_type", reply_to); return;
     }
     auto resp = rm_->tryAccept(req);
     amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
@@ -236,13 +236,14 @@ void Controller::handleTempQuery(const TaskRequest& req, const std::string& repl
 void Controller::sendReject(const std::string& req_id,
                               const std::string& corr_id,
                               RejectCode code,
-                              const std::string& reason) {
+                              const std::string& reason,
+                              const std::string& reply_to) {
     TaskResponse resp;
     resp.request_id    = req_id;
     resp.correlation_id= corr_id;
     resp.reject_code   = code;
     resp.reject_reason = reason;
-    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp));
+    amqp_->sendResponse(MessageCodec::encodeTaskResponse(resp), reply_to);
 }
 
 } // namespace sdr

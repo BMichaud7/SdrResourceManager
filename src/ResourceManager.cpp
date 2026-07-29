@@ -1415,7 +1415,11 @@ void ResourceManager::activateTask(const std::string& task_id) {
                 }
                 auto streamer = std::make_shared<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
                 streamer->updateCenterFreq(alloc.center_freq_hz);
-                streamer->start();
+                // For triggered tasks, TriggerMonitor owns readStream exclusively
+                // during the detection phase and calls streamer->start() itself on
+                // trigger. Starting here too would create two concurrent readStream
+                // callers on the same SoapySDR stream — explicitly unsafe.
+                if (!rec.trigger_params) streamer->start();
                 rt.streamers.push_back(streamer);
                 for (int ch : alloc.rx_channels) {
                     std::string key = alloc.device_id + ":" + std::to_string(ch);
@@ -1476,7 +1480,9 @@ void ResourceManager::activateTask(const std::string& task_id) {
                 sc.sample_rate   = alloc.sample_rate_sps;
                 auto streamer = std::make_shared<IQStreamer>(sc, dev->soapyDevice(), s, task_err_cb);
                 streamer->updateCenterFreq(alloc.center_freq_hz);
-                streamer->start();
+                // For triggered tasks, TriggerMonitor owns readStream exclusively
+                // during detection and calls streamer->start() itself on trigger.
+                if (!rec.trigger_params) streamer->start();
                 rt.streamers.push_back(streamer);
 
                 if (needs_ddc) {

@@ -105,7 +105,8 @@ private:
     void handleTempQuery(const TaskRequest& req,   const std::string& reply_to);
 
     void sendReject(const std::string& req_id, const std::string& corr_id,
-                    RejectCode code, const std::string& reason);
+                    RejectCode code, const std::string& reason,
+                    const std::string& reply_to = "");
 };
 
 } // namespace sdr
